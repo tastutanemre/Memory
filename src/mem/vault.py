@@ -174,7 +174,26 @@ Bu kasa `mem` motoru tarafından yönetilen ikinci beyindir. Oturum başında aj
 - Kararlar `projects/<proje>/kararlar/` altında ADR olarak tutulur.
 - Hassas veri (sır, anahtar, kişisel veri) hafızaya yazılmaz; DLP kalkanı bunu zorlar.
 - Hafıza beyaz listesinde olmayan çalışma alanlarına hiçbir şey yazılmaz/okunmaz.
+
+Bağlantılar: [[Kurallar|Genel kurallar]]
 """
+
+_OBSIDIAN_GRAPH = {
+    "collapse-filter": False,
+    "search": "-path:receipts -path:archive",
+    "showTags": False,
+    "showAttachments": False,
+    "hideUnresolved": False,
+    "showOrphans": True,
+    "collapse-color-groups": False,
+    "colorGroups": [
+        {"query": "file:Core OR path:Kurallar.md", "color": {"a": 1, "rgb": 15381256}},
+        {"query": "file:Genel-Bakis", "color": {"a": 1, "rgb": 3899638}},
+        {"query": "path:kararlar", "color": {"a": 1, "rgb": 1096065}},
+        {"query": "file:Kurallar path:projects", "color": {"a": 1, "rgb": 16347926}},
+        {"query": "path:knowledge", "color": {"a": 1, "rgb": 11032055}},
+    ],
+}
 
 _DLP_PATTERNS = """# Şirkete özel DLP desenleri (her satır bir desen; # yorum satırıdır)
 # Düz metin: büyük/küçük harf duyarsız eşleşir. Örnekler:
@@ -211,6 +230,10 @@ def init_vault(vault_root, profile_name: str, dlp_mode: str | None = None, state
         created.append("dlp-patterns.txt")
     for d in ("projects", "knowledge", "receipts", "archive"):
         (root / d).mkdir(exist_ok=True)
+    obs_graph = root / ".obsidian" / "graph.json"
+    if not obs_graph.exists():
+        obs_graph.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(obs_graph, json.dumps(_OBSIDIAN_GRAPH, ensure_ascii=False, indent=2) + "\n")
     templates = {
         "Core.md": ({"title": "Core", "kind": "knowledge", "status": "active", "created_at": now}, _CORE_BODY),
         "Kurallar.md": (
@@ -892,8 +915,9 @@ def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[
         created = _iso(now)
         if sess.exists(receipt_id):
             created = str(parse_markdown(sess.read(receipt_id))[0].get("created_at") or created)
+        proj_ref = f"[[projects/{slug}/Genel-Bakis|{slug}]]" if slug else "[[Core|genel]]"
         rbody = [f"# Makbuz — {tag}", "",
-                 f"**Proje:** {slug or '-'} · **Harness:** {harness} · **Oturum:** {tag}", "", summary_c]
+                 f"**Proje:** {proj_ref} · **Harness:** {harness} · **Oturum:** {tag}", "", summary_c]
         if threads_c:
             rbody += ["", "**Açık konular:**"] + [f"- {t}" for t in threads_c]
         if refs_c:
