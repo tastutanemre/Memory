@@ -1,103 +1,197 @@
-# mem — İkinci Beyin Motoru
+# mem — Yerel İkinci Beyin (MCP) Motoru
 
-Sıfır bağımlılıklı (yalnız Python 3.11+ standart kütüphanesi), kurumsal EDR/DLP dostu mühendislik hafızası.
-Markdown kasası (Obsidian uyumlu) + SQLite FTS5 indeksi + MCP sunucusu. **Devin Desktop** birincil hedef;
-Antigravity, Claude Code ve Codex ile de çalışır.
+Yapay zekâ kodlama ajanları ve masaüstü asistanları için **sıfır bağımlılıklı**, **tamamen çevrimdışı (yerel)** ve **Obsidian uyumlu** mühendislik hafızası motoru.
 
-## Tasarım ilkeleri
+Projelerinizde alınan mimari kararları (ADR), kalıcı kuralları, açık konuları ve oturum devir özetlerini düz Markdown dosyaları olarak saklar; **Model Context Protocol (MCP)** üzerinden kullandığınız tüm yapay zekâ araçlarının aynı hafızayı paylaşmasını sağlar.
 
-| İlke | Uygulama |
+---
+
+## Öne Çıkan Özellikler
+
+- **Sıfır Harici Bağımlılık (`pip install` gerekmez):** Yalnızca Python 3.11+ standart kütüphanesi (`sqlite3`, `json`, `pathlib`) ile çalışır. Doğrudan `python mem.py` olarak çalıştırılabilir.
+- **%100 Yerel ve Sıfır Ağ Erişimi:** Hiçbir ağ modülü (`http`, `urllib`, `socket`, `ssl`) içermez; dış API, telemetri veya bulut servisi kullanmaz (birim testleriyle kilitlidir).
+- **Çoklu Ajan ve Masaüstü Desteği:** Tek komutla **Claude Code**, **Claude Desktop**, **ChatGPT / Codex**, **Google Antigravity** ve **Devin Desktop** ile bağlanır.
+- **Obsidian Doğal Uyumu:** Notlar standart YAML frontmatter ve `[[WikiLink]]` bağlantılarıyla yazılır. Kasa doğrudan Obsidian'da açıldığında projeler kendi isimleriyle merkez düğüm olur, kararlar ve kurallar renk gruplarıyla otomatik görselleşir.
+- **Türkçe Kök/Ek Duyarlı Hızlı Arama:** SQLite WAL + FTS5 BM25 tam metin araması; Türkçe çekim eklerini köklerken (`bağlantılarından` → `bağlant`) teknik terimleri (`PostgreSQL`, `OAuth2`, `mcp_config`) bozmaz. `[[WikiLink]]` komşuluk grafı ve karar/kural önceliğiyle sıralar.
+- **Beyaz Liste ve DLP Kalkanı:** Yalnızca kaydettiğiniz proje klasörlerinde (`projects.json`) çalışır; kayıtsız dizinlerde hiçbir okuma/yazma yapmaz (`unregistered_workspace`). Dahili sır/anahtar/kişisel veri tarayıcısı (`redact` veya `block` modu) hassas verilerin kasaya sızmasını önler.
+- **Çok Ajanlı Eşzamanlılık Güvenliği:** Aynı anda birden fazla ajan çalışırken işletim sistemi dosya kilidi (`msvcrt` / `fcntl`), atomik yazma (`fsync` + `os.replace`) ve `sha256` iyimser kilitleme ile veri ezilmesini engeller.
+
+---
+
+## Gereksinimler
+
+- **Python 3.11 veya üzeri** (SQLite FTS5 desteği standart kurulumla birlikte gelir)
+- Harici Python paketi gerekmez.
+
+---
+
+## Hızlı Başlangıç
+
+### 1. Repoyu İndirin
+
+```bash
+git clone https://github.com/tastutanemre/Memory.git
+cd Memory
+```
+
+### 2. Hafıza Kasasını (Vault) Oluşturun
+
+**Windows (PowerShell):**
+```powershell
+python mem.py init --profile personal --vault C:\Notlar\Hafiza
+```
+
+**macOS / Linux:**
+```bash
+python3 mem.py init --profile personal --vault ~/Notes/MemoryVault
+```
+
+> Not: `--vault` vermezseniz kasa otomatik olarak kullanıcı veri dizininiz altında oluşturulur. İndeks veritabanı (`index.sqlite3`) ve kilit dosyaları her zaman kasa klasörünün **dışında** tutulur; böylece Obsidian veya bulut senkronizasyonuyla çakışmaz.
+
+### 3. Projelerinizi Kaydedin
+
+Hafızanın devreye girmesini istediğiniz yazılım projelerini beyaz listeye ekleyin:
+
+```bash
+python mem.py project add backend-api --root /yol/backend-api --name "Backend API"
+```
+
+### 4. Kullandığınız Yapay Zekâ Araçlarına Bağlayın
+
+```bash
+# Claude Code (CLI / IDE eklentisi)
+python mem.py connect claude --profile personal
+
+# Claude Desktop (Masaüstü sohbet uygulaması)
+python mem.py connect claude-desktop --profile personal
+
+# OpenAI Codex / ChatGPT Desktop (Codex modülü)
+python mem.py connect codex --profile personal
+
+# Google Antigravity (IDE & v2)
+python mem.py connect antigravity --profile personal
+
+# Devin Desktop
+python mem.py connect devin --profile personal
+```
+
+Ne yazılacağını önceden görmek için `--dry-run`, bağlantıyı tamamen kaldırmak için `--uninstall` bayrağını kullanabilirsiniz (mevcut diğer MCP sunucularınıza ve ayarlarınıza dokunmaz; ilk değişiklikten önce `.bak` yedeği alır):
+
+```bash
+python mem.py connect claude --profile personal --dry-run
+python mem.py connect claude --uninstall
+```
+
+### 5. Kurulumu Doğrulayın
+
+```bash
+python mem.py doctor --profile personal
+```
+
+---
+
+## Desteklenen Araçlar ve Yapılandırma Dosyaları
+
+`mem.py connect <hedef>` komutu herhangi bir gizli kabuk betiği veya arka plan servisi kurmaz; yalnızca ilgili aracın standart MCP ve kural dosyasına şeffaf bir kayıt ekler:
+
+| Hedef (`harness`) | MCP Yapılandırması | Global Kural Bloğu | Not |
+|---|---|---|---|
+| `claude` | `~/.claude.json` | `~/.claude/CLAUDE.md` | Claude Code CLI ve IDE eklentisi |
+| `claude-desktop` | `claude_desktop_config.json` *(AppData / MSIX / macOS Application Support)* | — | Masaüstü sohbet için `--vault-scope` ile bağlanır |
+| `codex` | `~/.codex/config.toml` | `~/.codex/AGENTS.md` | Codex CLI ve ChatGPT/Codex Desktop |
+| `antigravity` | `~/.gemini/config/mcp_config.json` | `~/.gemini/config/GEMINI.md` | Antigravity IDE ve Antigravity 2.0 |
+| `devin` | `%APPDATA%\devin\mcp_config.json` *(POSIX: `~/.config/devin/mcp_config.json`)* | `.../devin/AGENTS.md` | Devin Desktop |
+
+İsteğe bağlı olarak `skills/memory/SKILL.md` dosyasını kullandığınız aracın `skills/memory/SKILL.md` dizinine kopyalayarak ajan becerisi (skill) olarak da tanıtabilirsiniz.
+
+---
+
+## MCP Araçları ve Prompt'lar
+
+Bağlantı kurulduğunda yapay zekâ ajanınız şu MCP araçlarını doğrudan kullanır:
+
+| MCP Aracı | Görevi |
 |---|---|
-| Sıfır bağımlılık | `pip install` gerekmez: `python mem.py <komut>` (isteğe bağlı `pyproject.toml` ile `mem` komutu). |
-| Sıfır ağ | `urllib/http/socket/ssl…` hiçbir yerde import edilmez (testle kilitli). Dış model/servis yok. |
-| EDR dostu | Alt süreç yok, PowerShell/`EncodedCommand`/Base64 yok, başlangıç klasörü/zamanlanmış görev yok, gizli arka plan süreci yok. MCP kaydı doğrudan `python` + `mem.py` dizisidir. |
-| Veri sızıntısı yok | Hafıza **beyaz liste** (`projects.json`) dışındaki çalışma alanlarında hiçbir şey okumaz/yazmaz (`unregistered_workspace`). Şirket repolarına dosya yazılmaz. |
-| DLP varsayılan açık | `work` profili `block`, diğerleri `redact`. Sır hata mesajına/loga açık yazılmaz. |
-| Çok ajanlı güvenlik | OS dosya kilidi (`msvcrt`/`fcntl`), atomik yazma (`fsync` + `os.replace`), `sha256` iyimser kilit, son 20 yedek. |
+| `memory_bootstrap` | Oturum başında çağrılır; `Core.md`, genel/proje kuralları, açık konular ve son oturum devir kartını getirir. |
+| `memory_search` | Türkçe kök/ek duyarlı FTS5 BM25 + `[[WikiLink]]` komşuluk grafı ile hafızada arama yapar. |
+| `memory_read` | Belirtilen notu ve iyimser kilitleme için güncel `sha256` özetini okur. |
+| `memory_decide` | Mimari/ürün kararlarını standart ADR formatında kaydeder; mükerrer kararları uyarır, `supersedes` ile eski kararları geçersiz kılar. |
+| `memory_rule` | Kullanıcı düzeltmelerinden çıkan kalıcı kuralları (`global` veya proje kapsamlı) ekler. |
+| `memory_patch` | Mevcut bir notu `expected_sha256` doğrulamasıyla güvenli biçimde günceller. |
+| `memory_finish` | Oturum sonunda iş makbuzu oluşturur, `Son-Oturum.md` devir kartını ve `Acik-Konular.md` listesini günceller. |
 
-## Hızlı başlangıç (Windows / PowerShell, pip yok)
+**Hazır MCP Prompt'ları:** `start` (oturumu bağlamla başlat), `decide` (kararı ADR olarak kaydet), `wrapup` (oturum devir özeti yaz).
 
-```powershell
-cd C:\dev\repos\Memory
-python mem.py init --profile work --vault D:\Hafiza\work     # kasa + profil (dlp: block)
-python mem.py project add order-service --root C:\work\repos\OrderService --name OrderService
-cd C:\work\repos\OrderService
-python C:\dev\repos\Memory\mem.py bootstrap --task "cache"   # oturum bağlamı
-python C:\dev\repos\Memory\mem.py decide --title "Redis cache kullan" --decision "Okumalar için Redis" --rationale "Hız"
-python C:\dev\repos\Memory\mem.py rule "Her PR test içermeli" --reason "kalite"
-python C:\dev\repos\Memory\mem.py search "önbellek kararları"
-python C:\dev\repos\Memory\mem.py finish --summary "Cache eklendi" --thread "TTL belirle"
-python C:\dev\repos\Memory\mem.py doctor
+---
+
+## Komut Satırı (CLI) Kullanımı
+
+MCP dışında doğrudan terminalden de tüm işlemler yapılabilir (`--json` bayrağı makine okunur çıktı üretir):
+
+```bash
+python mem.py bootstrap --task "kimlik doğrulama"
+python mem.py decide --title "Önbellek katmanı" --decision "Okuma yoğun uçlarda Redis kullanılacak" --rationale "Düşük gecikme"
+python mem.py rule "Her veritabanı şema değişikliği geri alınabilir migrasyon içermeli" --reason "Canlı güvenlik"
+python mem.py search "önbellek kararları"
+python mem.py read projects/backend-api/Backend-API.md
+python mem.py finish --summary "OAuth2 akışı tamamlandı" --thread "Yenileme token rotasyonu eklenecek"
+python mem.py sync
+python mem.py profiles
+python mem.py doctor
 ```
 
-`--json` her komutta makine okunur çıktı verir. `MEM_HOME` ortam değişkeni profil kaydı ve state dizinini taşır
-(varsayılan: `%LOCALAPPDATA%\mem-engine`, POSIX: `~/.local/share/mem-engine`). Profil seçimi: `--profile` > `MEM_PROFILE` > kayıtlı varsayılan.
+**Çıkış Kodları:** `0` başarılı · `1` doctor hatası · `2` kullanım/doğrulama hatası · `3` DLP engeli · `4` `sha256` çakışması · `5` kayıtsız çalışma alanı.
 
-Çıkış kodları: `0` tamam · `2` hata/kullanım · `3` DLP engeli · `4` sha256 çakışması · `5` kayıtsız çalışma alanı · `1` doctor hatası.
+---
 
-## Devin Desktop kurulumu
+## Profiller ve Hassas Veri Kalkanı (DLP)
 
-```powershell
-python mem.py connect devin --profile work --dry-run   # önce ne yazılacağını gör
-python mem.py connect devin --profile work
-```
+Aynı bilgisayarda birden fazla bağımsız kasa tutabilirsiniz (ör. `--profile personal` ve `--profile work`).
 
-Yazılanlar (mevcut sunucular/metinler korunur, ilk değişiklikte `.bak` alınır):
+- **`redact` modu (`personal` ve genel profillerde varsayılan):** API anahtarı, özel anahtar (`PEM`/`PGP`), JWT, veritabanı bağlantı dizgesi (`URI` / `ADO.NET`), `.env` parola atamaları, IBAN ve TCKN yakalandığında otomatik olarak `[REDACTED:<kategori>]` ile maskelenir.
+- **`block` modu (`work` profilinde varsayılan veya `--dlp block` ile):** Hassas veri tespit edildiğinde yazma işlemi tamamen reddedilir; hata mesajında gizli değerin kendisi asla açık yazılmaz.
+- **Özel Kurallar (`dlp-patterns.txt`):** Kasa kökündeki `dlp-patterns.txt` dosyasına kendi alan adlarınızı, iç IP bloklarınızı veya `regex:` önekli desenlerinizi ekleyebilirsiniz.
 
-- `%APPDATA%\devin\mcp_config.json` → `mcpServers.mem = { command: <python.exe>, args: [<...>\mem.py, "mcp", "--profile", "work"] }`
-- `%APPDATA%\devin\AGENTS.md` → `<!-- mem-bridge:start --> … <!-- mem-bridge:end -->` kural bloğu
+---
 
-Kaldırma: `python mem.py connect devin --uninstall` (yalnız kendi anahtarı/bloğu silinir).
-Diğer hedefler: `antigravity`, `claude`, `claude-desktop`, `codex` (`--config-root <dizin>` ile gerçek ev dizinine dokunmadan deneme).
-Skill: `skills/memory/SKILL.md` dosyasını `.devin/skills/memory/` veya `.agents/skills/memory/` altına kopyalayın.
-Devin Desktop'ta MCP prompt'ları `/mcp__mem__start`, `/mcp__mem__decide`, `/mcp__mem__wrapup` olarak görünür.
-
-## Kasa yapısı
+## Kasa Yapısı ve Obsidian Görünümü
 
 ```text
-.mem-vault.json  projects.json  dlp-patterns.txt  Core.md  Kurallar.md
-projects/<slug>/{<ProjeAdi>,Kurallar,Acik-Konular,Son-Oturum}.md  projects/<slug>/kararlar/YYYY-MM-DD-*.md
-knowledge/  receipts/YYYY-MM/<hash16>.md  archive/YYYY-MM.md
+<vault>/
+├── .mem-vault.json
+├── .obsidian/graph.json       # Otomatik renk grupları ve gürültü filtresi
+├── projects.json              # İzinli proje kök dizinleri (beyaz liste)
+├── dlp-patterns.txt           # Özel DLP desenleri
+├── Core.md                    # Çalışma biçimi ve kalıcı tercihler
+├── Kurallar.md                # Genel kurallar
+├── projects/
+│   └── <slug>/
+│       ├── <ProjeAdı>.md      # Proje merkezi (Obsidian grafik yıldızı)
+│       ├── Kurallar.md        # Projeye özel kurallar
+│       ├── Acik-Konular.md    # Açık işler
+│       ├── Son-Oturum.md      # Son oturum devir kartları
+│       └── kararlar/          # YYYY-MM-DD-baslik.md (ADR kayıtları)
+├── knowledge/                 # Projeler arası ortak bilgi ve kararlar
+├── receipts/                  # Oturum makbuzları (grafikte varsayılan gizli)
+└── archive/                   # Otomatik arşivlenen eski oturum kartları
 ```
 
-İndeks (`index.sqlite3`, kilit, yedekler) **kasanın dışında** `state/<profil>/` altındadır. Notlar gerçek YAML frontmatter taşır
-(eski JSON frontmatter okunur, yazarken YAML'a çevrilir).
+Kasayı **Obsidian** ile doğrudan klasör olarak açtığınızda (`.obsidian/graph.json` hazır gelir):
+- Merkez düğümler (`Core` / `Kurallar`), proje merkezleri, mimari kararlar (`kararlar/`), proje kuralları ve ortak bilgi notları farklı renklerle ayrılır.
+- Ham oturum makbuzları (`receipts/`) ve arşiv (`archive/`) varsayılan filtreyle gizlenerek grafik temiz tutulur.
 
-## Modüller (`src/mem/`)
+---
 
-`config` profil/beyaz liste · `frontmatter` YAML alt kümesi · `dlp` sır kalkanı · `lock` kilit + atomik yazma + yol güvenliği ·
-`turkish` kök/ek + teknik terim koruması · `store` SQLite WAL+FTS5 + `(mtime_ns,size)` artımlı sync · `search` BM25 + WikiLink grafı + `SemanticReranker` kancası ·
-`vault` iş akışları · `mcp_server` JSON-RPC 2.0 stdio · `harness` bağlayıcılar · `migrate` `import-v3` · `cli`.
+## Testleri Çalıştırma
 
-### MCP araçları
+Tüm birim, eşzamanlılık ve güvenlik değişmezi testleri geçici dizin izolasyonunda (`tempfile`) çalışır; gerçek kullanıcı yapılandırmalarınıza dokunmaz:
 
-`memory_bootstrap`, `memory_search`, `memory_read`, `memory_decide`, `memory_rule`, `memory_patch`, `memory_finish` (+ `start`/`decide`/`wrapup` prompt'ları).
-Hatalar JSON-RPC'yi çökertmez: `isError: true` + eyleme dönük metin (`DLPBlockedError`, `ConcurrencyConflictError`…).
-`stdout` yalnız protokol içindir; tanı çıktıları `stderr`'e gider. Varsayılan çerçeveleme satır-sonu ayrımlı JSON; ilk mesaj `Content-Length:` ile başlarsa LSP çerçevelemesine otomatik geçilir.
-
-## DLP
-
-Kategoriler: `api_token`, `private_key`, `jwt_bearer`, `connection_string`, `generic_secret_assignment`, `pii_tr` (IBAN, algoritma doğrulamalı TCKN), `custom_pattern`.
-Şirkete özel desenler için kasa kökündeki `dlp-patterns.txt` (düz metin veya `regex:` önekli sınırlı regex).
-`block`: yazma reddedilir, hata yalnız kategori ve maskeli önizleme içerir. `redact`: `[REDACTED:<kategori>]`.
-
-## Arama
-
-Her kelime için hem katlanmış tam biçim hem kök indekslenir (`bağlantılarından` → `bağlant`); CamelCase/rakam/`_`/`.`/`-` içeren ve İngilizce teknik terimler
-(`AuthHub`, `claude`, `mcp_config`) asla köklenmez. Varsayılan olarak `untrusted`, `superseded` ve `archive/` notlar elenir; proje kapsamı yalnız o projeyi + paylaşılan notları getirir.
-Karar/kural +%15, aktif proje +%25, 1-hop `[[WikiLink]]` komşuluğu bonus alır.
-
-## Testler
-
-```powershell
+```bash
 python -m unittest discover -s tests -v
 ```
 
-Tüm testler `tempfile` + `MEM_HOME`/`--config-root` izolasyonunda çalışır; gerçek `~/.claude`, `~/.codex`, `~/.gemini`, `%APPDATA%\devin` dosyalarına dokunmaz.
+---
 
-## Bilinen sınırlar
+## Lisans
 
-- Kök bulucu ünlü uyumunu ASCII-katlanmış uzayda yaklaşık uygular (tutarlılık için agresif); nadir yanlış eşleşmeler mümkündür, tam eşleşme her zaman daha yüksek puan alır.
-- Aynı süreçte `VaultLock` yeniden girilemez; kilit yalnız yazma işlemlerinde alınır.
-- `archive/YYYY-MM.md` tüm projelerin kartlarını `<!-- proje: slug -->` etiketiyle taşır; arşiv varsayılan aramada elenir.
-- MCP sunucusu IDE'nin başlattığı dizinde çalışabilir; ajanlar her araç çağrısında `cwd` göndermelidir. `cwd` atlanırsa sunucu önce kendi (kayıtlıysa) dizinini, sonra son başarılı `memory_bootstrap` çalışma alanını kullanır; ikisi de yoksa açık hata (`isError`) döner.
+[MIT License](./LICENSE)
