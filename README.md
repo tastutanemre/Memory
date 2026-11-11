@@ -48,7 +48,7 @@ Yazılanlar (mevcut sunucular/metinler korunur, ilk değişiklikte `.bak` alın�
 - `%APPDATA%\devin\AGENTS.md` → `<!-- mem-bridge:start --> … <!-- mem-bridge:end -->` kural bloğu
 
 Kaldırma: `python mem.py connect devin --uninstall` (yalnız kendi anahtarı/bloğu silinir).
-Diğer hedefler: `antigravity`, `claude`, `codex` (`--config-root <dizin>` ile gerçek ev dizinine dokunmadan deneme).
+Diğer hedefler: `antigravity`, `claude`, `claude-desktop`, `codex` (`--config-root <dizin>` ile gerçek ev dizinine dokunmadan deneme).
 Skill: `skills/memory/SKILL.md` dosyasını `.devin/skills/memory/` veya `.agents/skills/memory/` altına kopyalayın.
 Devin Desktop'ta MCP prompt'ları `/mcp__mem__start`, `/mcp__mem__decide`, `/mcp__mem__wrapup` olarak görünür.
 
