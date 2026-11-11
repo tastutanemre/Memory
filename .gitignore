@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+.mem-tmp-*
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+/vault/
+/vaults/

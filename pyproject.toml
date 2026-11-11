@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mem-engine"
+version = "0.1.0"
+description = "Sifir bagimlilikli, kurumsal DLP dostu Ikinci Beyin (muhendislik hafizasi) motoru"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+mem = "mem.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
