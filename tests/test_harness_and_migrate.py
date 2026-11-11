@@ -100,6 +100,9 @@ class HarnessTests(IsolatedCase):
         self.assertTrue((cfg / ".claude" / "CLAUDE.md").exists())
         harness.connect_harness("antigravity", "work", config_root_override=cfg)
         self.assertTrue((cfg / ".gemini" / "config" / "GEMINI.md").exists())
+        harness.connect_harness("claude-desktop", "personal", config_root_override=cfg)
+        cd = json.loads((cfg / "claude-desktop" / "claude_desktop_config.json").read_text(encoding="utf-8"))
+        self.assertEqual(cd["mcpServers"]["mem"]["args"][1:], ["mcp", "--profile", "personal", "--vault-scope"])
 
     def test_invalid_json_left_untouched_and_unknown_harness(self):
         cfg = self.tmp / "r2"

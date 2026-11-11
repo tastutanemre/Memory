@@ -112,10 +112,14 @@ def _text(payload, is_error: bool = False) -> dict:
 
 
 class McpServer:
-    def __init__(self, vault_root, state_dir=None, default_cwd: str | None = None):
+    def __init__(self, vault_root, state_dir=None, default_cwd: str | None = None,
+                 vault_scope: bool = False):
         self.vault_root = Path(vault_root)
         self.state_dir = state_dir
-        self.default_cwd = default_cwd if default_cwd is not None else os.getcwd()
+        self.vault_scope = vault_scope
+        self.default_cwd = str(self.vault_root) if vault_scope else (
+            default_cwd if default_cwd is not None else os.getcwd()
+        )
         # Son BASARILI memory_bootstrap(cwd=...) calisma alani; IDE sunucuyu kayitsiz bir dizinde
         # (ör. %USERPROFILE%) baslattiginda cwd'siz sonraki cagrilar icin guvenli yedek.
         self._bootstrapped_cwd: str | None = None
@@ -256,7 +260,16 @@ class McpServer:
         if method == "ping":
             return {}
         if method == "tools/list":
-            return {"tools": TOOLS}
+            if not self.vault_scope:
+                return {"tools": TOOLS}
+            tools = []
+            for t in TOOLS:
+                if t["name"] == "memory_bootstrap":
+                    schema = {**t["inputSchema"], "required": []}
+                    tools.append({**t, "inputSchema": schema})
+                else:
+                    tools.append(t)
+            return {"tools": tools}
         if method == "tools/call":
             name = params.get("name")
             if not isinstance(name, str) or name not in {t["name"] for t in TOOLS}:
@@ -392,12 +405,12 @@ def serve(server: McpServer, inp, out) -> None:
             _write_message(out, reply, mode)
 
 
-def run_stdio(vault_root, state_dir=None) -> int:
+def run_stdio(vault_root, state_dir=None, vault_scope: bool = False) -> int:
     """Gercek stdio: stdout ikili ve yalniz protokol; sapan print'ler stderr'e yonlendirilir."""
     out = sys.stdout.buffer
     inp = sys.stdin.buffer
     sys.stdout = sys.stderr
-    server = McpServer(vault_root, state_dir)
+    server = McpServer(vault_root, state_dir, vault_scope=vault_scope)
     try:
         serve(server, inp, out)
     except (BrokenPipeError, KeyboardInterrupt):
@@ -405,11 +418,12 @@ def run_stdio(vault_root, state_dir=None) -> int:
     return 0
 
 
-def main_for_profile(profile_name: str | None = None, vault_root=None, state_dir=None) -> int:
+def main_for_profile(profile_name: str | None = None, vault_root=None, state_dir=None,
+                     vault_scope: bool = False) -> int:
     if vault_root:
         root = Path(vault_root)
         sdir = config.resolve_state_dir(root, state_dir)
     else:
         prof = config.get_profile(profile_name)
         root, sdir = Path(prof.vault_root), Path(prof.state_dir)
-    return run_stdio(root, sdir)
+    return run_stdio(root, sdir, vault_scope=vault_scope)

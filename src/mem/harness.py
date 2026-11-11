@@ -13,7 +13,7 @@ BLOCK_START = "<!-- mem-bridge:start -->"
 BLOCK_END = "<!-- mem-bridge:end -->"
 TOML_START = "# mem-bridge:start"
 TOML_END = "# mem-bridge:end"
-HARNESSES = ("devin", "antigravity", "claude", "codex")
+HARNESSES = ("devin", "antigravity", "claude", "claude-desktop", "codex")
 
 RULE_BLOCK = f"""{BLOCK_START}
 ## Hafıza (mem) köprüsü
@@ -48,6 +48,26 @@ def _devin_dir(override) -> Path:
     return Path.home() / ".config" / "devin"
 
 
+def _claude_desktop_config(override) -> Path:
+    if override:
+        return Path(override) / "claude-desktop" / "claude_desktop_config.json"
+    if os.name == "nt":
+        localappdata = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        msix_root = localappdata / "Claude-Data"
+        if msix_root.is_dir():
+            matches = sorted(msix_root.glob("claude_*/claude_desktop_config.json"))
+            if matches:
+                return matches[-1]
+            dirs = sorted(p for p in msix_root.glob("claude_*") if p.is_dir())
+            if dirs:
+                return dirs[-1] / "claude_desktop_config.json"
+        appdata = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
+        return appdata / "Claude" / "claude_desktop_config.json"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+
+
 def default_mem_py() -> Path:
     return Path(__file__).resolve().parents[2] / "mem.py"
 
@@ -62,6 +82,8 @@ def _targets(harness: str, override) -> dict:
                 "rules": home / ".gemini" / "config" / "GEMINI.md"}
     if harness == "claude":
         return {"mcp": home / ".claude.json", "mcp_kind": "json", "rules": home / ".claude" / "CLAUDE.md"}
+    if harness == "claude-desktop":
+        return {"mcp": _claude_desktop_config(override), "mcp_kind": "json", "rules": None, "vault_scope": True}
     if harness == "codex":
         return {"mcp": home / ".codex" / "config.toml", "mcp_kind": "toml", "rules": home / ".codex" / "AGENTS.md"}
     raise ValueError(f"Bilinmeyen harness: {harness!r}. Seçenekler: {', '.join(HARNESSES)}")
@@ -119,8 +141,11 @@ def _json_load(path: Path, text: str | None) -> dict:
     return data
 
 
-def _mcp_entry(profile_name: str, mem_py: Path, python: str) -> dict:
-    return {"command": python, "args": [str(mem_py), "mcp", "--profile", profile_name]}
+def _mcp_entry(profile_name: str, mem_py: Path, python: str, vault_scope: bool = False) -> dict:
+    args = [str(mem_py), "mcp", "--profile", profile_name]
+    if vault_scope:
+        args.append("--vault-scope")
+    return {"command": python, "args": args}
 
 
 def _toml_block(entry: dict) -> str:
@@ -137,7 +162,8 @@ def connect_harness(harness: str, profile_name: str, config_root_override=None, 
     """MCP kaydi + global kural blogu yazar (veya uninstall ile yalniz kendi kayitlarini kaldirir)."""
     t = _targets(harness, config_root_override)
     mem_py = Path(mem_py_path) if mem_py_path else default_mem_py()
-    entry = _mcp_entry(profile_name, mem_py, python_exe or sys.executable)
+    entry = _mcp_entry(profile_name, mem_py, python_exe or sys.executable,
+                       vault_scope=bool(t.get("vault_scope")))
     files: list[dict] = []
 
     # --- MCP kaydi
@@ -169,10 +195,11 @@ def connect_harness(harness: str, profile_name: str, config_root_override=None, 
     files.append(_apply(mcp_path, original, new_text, dry_run, uninstall))
 
     # --- kural blogu
-    rules_path: Path = t["rules"]
-    roriginal = _read(rules_path)
-    rnew = _upsert_block(roriginal, RULE_BLOCK, BLOCK_START, BLOCK_END, uninstall)
-    files.append(_apply(rules_path, roriginal, rnew, dry_run, uninstall))
+    rules_path: Path | None = t["rules"]
+    if rules_path is not None:
+        roriginal = _read(rules_path)
+        rnew = _upsert_block(roriginal, RULE_BLOCK, BLOCK_START, BLOCK_END, uninstall)
+        files.append(_apply(rules_path, roriginal, rnew, dry_run, uninstall))
 
     return {"harness": harness, "profile": profile_name, "uninstall": uninstall, "dry_run": dry_run,
             "mcp_entry": entry, "files": files}

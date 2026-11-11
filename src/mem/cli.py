@@ -192,7 +192,7 @@ def cmd_import_v3(args) -> int:
 
 def cmd_mcp(args) -> int:
     from .mcp_server import main_for_profile
-    return main_for_profile(args.profile, vault_root=args.vault)
+    return main_for_profile(args.profile, vault_root=args.vault, vault_scope=args.vault_scope)
 
 
 def cmd_profiles(args) -> int:
@@ -373,6 +373,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_profiles)
 
     s = sub.add_parser("mcp", parents=[common], help="MCP stdio sunucusu")
+    s.add_argument("--vault-scope", action="store_true",
+                   help="masaüstü sohbet istemcileri (ör. Claude Desktop) için varsayılan kapsamı kasa kökü yap")
     s.set_defaults(func=cmd_mcp)
     return p
 
