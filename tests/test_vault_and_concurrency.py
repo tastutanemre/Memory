@@ -27,16 +27,16 @@ class VaultBase(IsolatedCase):
 class ProjectAndScopeTests(VaultBase):
     def test_register_project_creates_structure(self):
         base = self.root / "projects" / "order-service"
-        for n in ("Genel-Bakis.md", "Kurallar.md", "Acik-Konular.md", "Son-Oturum.md"):
+        for n in ("OrderService.md", "Kurallar.md", "Acik-Konular.md", "Son-Oturum.md"):
             self.assertTrue((base / n).is_file(), n)
         self.assertTrue((base / "kararlar").is_dir())
         projects = json.loads((self.root / "projects.json").read_text(encoding="utf-8"))["projects"]
         self.assertEqual(projects[0]["slug"], "order-service")
         rules = (self.root / "Kurallar.md").read_text(encoding="utf-8")
         self.assertIn("- [kapsam: order-service] [[projects/order-service/Kurallar|OrderService kuralları]]", rules)
-        before = (base / "Genel-Bakis.md").read_text(encoding="utf-8")
+        before = (base / "OrderService.md").read_text(encoding="utf-8")
         vault.register_project(self.root, "order-service", [self.repo])  # idempotent
-        self.assertEqual(before, (base / "Genel-Bakis.md").read_text(encoding="utf-8"))
+        self.assertEqual(before, (base / "OrderService.md").read_text(encoding="utf-8"))
         self.assertEqual(rules, (self.root / "Kurallar.md").read_text(encoding="utf-8"))
         with self.assertRaises(vault.VaultError):
             vault.register_project(self.root, "Bad Slug", [self.repo])
@@ -139,7 +139,7 @@ class DecisionTests(VaultBase):
 
     def test_hub_wikilinks_updated(self):
         res = self.decide("Veritabanı PostgreSQL", "PostgreSQL kullan")
-        hub = (self.root / "projects/order-service/Genel-Bakis.md").read_text(encoding="utf-8")
+        hub = (self.root / "projects/order-service/OrderService.md").read_text(encoding="utf-8")
         self.assertIn(f"[[{res['path'][:-3]}|Veritabanı PostgreSQL]]", hub)
         self.assertIn("<!-- mem-links -->", hub)
         self.assertIn("<!-- /mem-links -->", hub)
@@ -147,10 +147,10 @@ class DecisionTests(VaultBase):
         try:
             store.sync_vault(conn, self.root)
             rows = conn.execute("SELECT 1 FROM links WHERE src_doc_id=? AND dst_doc_id=?",
-                                ("projects/order-service/Genel-Bakis.md", res["path"])).fetchall()
+                                ("projects/order-service/OrderService.md", res["path"])).fetchall()
             self.assertEqual(len(rows), 1)
             back = conn.execute("SELECT 1 FROM links WHERE src_doc_id=? AND dst_doc_id=?",
-                                (res["path"], "projects/order-service/Genel-Bakis.md")).fetchall()
+                                (res["path"], "projects/order-service/OrderService.md")).fetchall()
             self.assertEqual(len(back), 1)
         finally:
             conn.close()
@@ -177,7 +177,7 @@ class RuleTests(VaultBase):
 
 class PatchAndConcurrencyTests(VaultBase):
     def test_patch_sha_conflict_and_success(self):
-        note = "projects/order-service/Genel-Bakis.md"
+        note = "projects/order-service/OrderService.md"
         info = vault.read_note(self.root, note)
         with self.assertRaises(ConcurrencyConflictError) as cm:
             vault.patch_note(self.root, note, "0" * 64, [{"old": "Sipariş servisi", "new": "X"}], state_dir=self.state)

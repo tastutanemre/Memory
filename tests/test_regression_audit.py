@@ -266,13 +266,13 @@ class Major1ImportTests(IsolatedCase):
         self.assertEqual(res["unregistered_projects"], [])
         self.assertFalse((root / "projects/orderservice").exists())
         self.assertCountEqual(res["replaced_scaffold"], ["projects/order-service/Kurallar.md",
-                                                         "projects/order-service/Genel-Bakis.md"])
+                                                         "projects/order-service/OrderService.md"])
         rules = (root / "projects/order-service/Kurallar.md").read_text(encoding="utf-8")
         self.assertIn("v3 kuralı iki", rules)
         meta, _ = parse_markdown(rules)
         self.assertEqual(meta["project"], "order-service")
         self.assertEqual(meta["kind"], "rule")
-        hub = (root / "projects/order-service/Genel-Bakis.md").read_text(encoding="utf-8")
+        hub = (root / "projects/order-service/OrderService.md").read_text(encoding="utf-8")
         self.assertIn("v3 mimari özeti", hub)
         self.assertIn("<!-- mem-links -->", hub)
         self.assertIn("2026-01-01-redis", hub)  # hub blogu yenilendi

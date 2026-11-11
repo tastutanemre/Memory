@@ -151,14 +151,14 @@ class MigrateTests(IsolatedCase):
         # kayitli projenin DEGISMEMIS iskelet dosyalari (Genel-Bakis, Kurallar) v3 icerigiyle degistirilir
         self.assertEqual(len(dry["imported"]), 5)
         self.assertCountEqual(dry["replaced_scaffold"],
-                              ["projects/orderservice/Genel-Bakis.md", "projects/orderservice/Kurallar.md"])
+                              ["projects/orderservice/OrderService.md", "projects/orderservice/Kurallar.md"])
         self.assertFalse((root / "knowledge/ilke.md").exists())
 
         res = migrate.import_from_beyin_v3(v3, root, state_dir=state)
         self.assertEqual(tree_hash(v3), before)  # kaynak degismedi
         self.assertCountEqual(res["imported"], [
             "projects/orderservice/kararlar/2026-01-01-redis.md",
-            "projects/orderservice/Genel-Bakis.md",
+            "projects/orderservice/OrderService.md",
             "projects/orderservice/Kurallar.md",
             "knowledge/ilke.md",
             "knowledge/notes/genel/not.md",
@@ -182,7 +182,7 @@ class MigrateTests(IsolatedCase):
         self.assertIn("**Karar:** Redis kullan", body)
         hits = vault.search_memory(root, "redis", project="orderservice", state_dir=state)
         self.assertIn("projects/orderservice/kararlar/2026-01-01-redis.md", [h["doc_id"] for h in hits])
-        hub = (root / "projects/orderservice/Genel-Bakis.md").read_text(encoding="utf-8")
+        hub = (root / "projects/orderservice/OrderService.md").read_text(encoding="utf-8")
         self.assertIn("2026-01-01-redis", hub)
 
         again = migrate.import_from_beyin_v3(v3, root, state_dir=state)
@@ -239,7 +239,7 @@ class MigrateTests(IsolatedCase):
         self.assertEqual(old_meta["kind"], "decision")
         self.assertEqual(old_meta["date"], "2026-09-07")
         self.assertEqual(old_meta["status"], "superseded")
-        self.assertIn("[[projects/authhub/Genel-Bakis|AuthHub genel bakış]]", old_body)
+        self.assertIn("[[projects/authhub/AuthHub|AuthHub genel bakış]]", old_body)
         self.assertNotIn("beyin-baglantilar", old_body)
 
         hits = vault.search_memory(root, "karar", project="authhub", kind="decision", state_dir=state)

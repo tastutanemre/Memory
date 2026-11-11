@@ -183,12 +183,13 @@ _OBSIDIAN_GRAPH = {
     "search": "-path:receipts -path:archive",
     "showTags": False,
     "showAttachments": False,
-    "hideUnresolved": False,
+    "hideUnresolved": True,
     "showOrphans": True,
     "collapse-color-groups": False,
     "colorGroups": [
         {"query": "file:Core OR path:Kurallar.md", "color": {"a": 1, "rgb": 15381256}},
-        {"query": "file:Genel-Bakis", "color": {"a": 1, "rgb": 3899638}},
+        {"query": "path:projects -path:kararlar -file:Kurallar -file:Acik-Konular -file:Son-Oturum -file:Karar-Dizini",
+         "color": {"a": 1, "rgb": 3899638}},
         {"query": "path:kararlar", "color": {"a": 1, "rgb": 1096065}},
         {"query": "file:Kurallar path:projects", "color": {"a": 1, "rgb": 16347926}},
         {"query": "path:knowledge", "color": {"a": 1, "rgb": 11032055}},
@@ -260,11 +261,33 @@ def init_vault(vault_root, profile_name: str, dlp_mode: str | None = None, state
 # ---------------------------------------------------------------- proje kaydi
 
 
+def hub_filename(name: str, slug: str = "") -> str:
+    """Obsidian grafik dugumunde proje adinin gorunmesi icin merkez dosyasi `<ProjeAdi>.md` olarak adlandirilir."""
+    raw = (name or slug or "Genel-Bakis").strip()
+    cleaned = re.sub(r'[<>:"/\\|?*#\^\[\]\x00-\x1f]+', "-", raw).strip(". ")
+    if not cleaned or cleaned.lower() in ("kurallar", "acik-konular", "son-oturum", "kararlar"):
+        cleaned = f"{slug or 'proje'}-genel"
+    return f"{cleaned}.md"
+
+
+def project_hub_doc_id(vault_root, slug: str, name: str | None = None) -> str:
+    if name is None:
+        proj = config.get_project(vault_root, slug) or {}
+        name = proj.get("name") or slug
+    preferred = f"projects/{slug}/{hub_filename(name, slug)}"
+    legacy = f"projects/{slug}/Genel-Bakis.md"
+    vroot = Path(vault_root)
+    if not (vroot / preferred).exists() and (vroot / legacy).exists():
+        return legacy
+    return preferred
+
+
 def _project_files(slug: str, name: str, description: str, now: str) -> dict[str, str]:
     base = f"projects/{slug}"
+    hub_file = hub_filename(name, slug)
     desc = description.strip() or "(açıklama yok)"
     return {
-        f"{base}/Genel-Bakis.md": _meta_doc(
+        f"{base}/{hub_file}": _meta_doc(
             {"title": f"{name} genel bakış", "kind": "overview", "project": slug, "status": "active",
              "created_at": now},
             f"# {name} — Genel Bakış\n\n{desc}\n\n## Bağlantılar\n\n{LINKS_START}\n{LINKS_END}\n",
@@ -272,7 +295,7 @@ def _project_files(slug: str, name: str, description: str, now: str) -> dict[str
         f"{base}/Kurallar.md": _meta_doc(
             {"title": f"{name} kuralları", "kind": "rule", "project": slug, "status": "active",
              "created_at": now},
-            f"# {name} — Kurallar\n\n",
+            f"# {name} — Kurallar\n\nProje: [[{base}/{hub_file[:-3]}|{name} genel bakış]]\n",
         ),
         f"{base}/Acik-Konular.md": _meta_doc(
             {"title": f"{name} açık konular", "kind": "threads", "project": slug, "status": "active",
@@ -382,7 +405,7 @@ def _hub_block(sess: _Session, slug: str) -> str:
 
 
 def _refresh_hub(sess: _Session, slug: str) -> bool:
-    doc_id = f"projects/{slug}/Genel-Bakis.md"
+    doc_id = project_hub_doc_id(sess.ctx.vault_root, slug)
     if not sess.exists(doc_id):
         return False
     text = sess.read(doc_id)
@@ -727,7 +750,8 @@ def record_decision(vault_root, project: str | None, title: str, decision: str, 
             lines.append("**Kaynak:** " + ", ".join(sources_c))
         if slug:
             pname = (config.get_project(ctx.vault_root, slug) or {}).get("name", slug)
-            lines += ["", f"Proje: [[projects/{slug}/Genel-Bakis|{pname} genel bakış]]"]
+            hub_link = project_hub_doc_id(ctx.vault_root, slug, pname)[:-3]
+            lines += ["", f"Proje: [[{hub_link}|{pname} genel bakış]]"]
         sha = sess.write(doc_id, _meta_doc(meta, "\n".join(lines) + "\n"), "decide", {"supersedes": old_ids})
 
         for old in old_ids:
@@ -915,7 +939,11 @@ def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[
         created = _iso(now)
         if sess.exists(receipt_id):
             created = str(parse_markdown(sess.read(receipt_id))[0].get("created_at") or created)
-        proj_ref = f"[[projects/{slug}/Genel-Bakis|{slug}]]" if slug else "[[Core|genel]]"
+        if slug:
+            hub_link = project_hub_doc_id(ctx.vault_root, slug)[:-3]
+            proj_ref = f"[[{hub_link}|{slug}]]"
+        else:
+            proj_ref = "[[Core|genel]]"
         rbody = [f"# Makbuz — {tag}", "",
                  f"**Proje:** {proj_ref} · **Harness:** {harness} · **Oturum:** {tag}", "", summary_c]
         if threads_c:

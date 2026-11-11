@@ -21,6 +21,7 @@ from .vault import (
     _project_files,
     _refresh_hub,
     _Session,
+    hub_filename,
     slugify,
 )
 
@@ -44,6 +45,12 @@ def _slug_for(folder: str, projects: list[dict]) -> str:
     return slugify(folder)
 
 
+def _hub_for_slug(slug: str, folder: str, projects: list[dict]) -> str:
+    proj = next((p for p in projects if p["slug"] == slug), None)
+    pname = (proj or {}).get("name") or folder or slug
+    return hub_filename(pname, slug)
+
+
 def _map_target(rel: str, projects: list[dict], receipt_map: dict[str, str] | None = None) -> str | None:
     """v3 goreli yolu -> yeni kasa yolu."""
     clean = rel.strip().replace("\\", "/").lstrip("/")
@@ -54,10 +61,18 @@ def _map_target(rel: str, projects: list[dict], receipt_map: dict[str, str] | No
     parts = clean.split("/")
     if parts[0] == "notes":
         if len(parts) >= 4 and parts[1] == "projects":
-            return "/".join(["projects", _slug_for(parts[2], projects)] + parts[3:])
+            slug = _slug_for(parts[2], projects)
+            tail = list(parts[3:])
+            if len(tail) == 1 and tail[0] == "Genel-Bakis.md":
+                tail[0] = _hub_for_slug(slug, parts[2], projects)
+            return "/".join(["projects", slug] + tail)
         return "/".join(["knowledge", "notes"] + parts[1:])
     if parts[0] == "projects" and len(parts) >= 3:
-        return "/".join(["projects", _slug_for(parts[1], projects)] + parts[2:])
+        slug = _slug_for(parts[1], projects)
+        tail = list(parts[2:])
+        if len(tail) == 1 and tail[0] == "Genel-Bakis.md":
+            tail[0] = _hub_for_slug(slug, parts[1], projects)
+        return "/".join(["projects", slug] + tail)
     if parts[0] == "knowledge":
         return clean
     return None
@@ -86,8 +101,17 @@ def _upgrade_legacy_hub(body: str, is_overview: bool) -> str:
     return _LEGACY_HUB_RE.sub(lambda m: m.group(1).strip(), body)
 
 
+def _is_overview_target(target: str) -> bool:
+    parts = target.split("/")
+    return (
+        len(parts) == 3
+        and parts[0] == "projects"
+        and parts[2] not in ("Kurallar.md", "Acik-Konular.md", "Son-Oturum.md", "Karar-Dizini.md")
+    )
+
+
 def _infer_kind(target: str, current_kind: str | None) -> str:
-    if target.endswith("/Genel-Bakis.md"):
+    if _is_overview_target(target):
         return "overview"
     if target.endswith("/Kurallar.md") or target == "Kurallar.md":
         return "rule"
@@ -269,7 +293,7 @@ def import_from_beyin_v3(source_vault, target_vault, dry_run: bool = False, stat
             meta["imported_from"] = "beyin_v3"
             meta.setdefault("imported_at", now)
 
-            is_overview = target.endswith("/Genel-Bakis.md")
+            is_overview = _is_overview_target(target)
             body = _upgrade_legacy_hub(body, is_overview)
             body = _rewrite_wikilinks(body, projects, receipt_map)
 

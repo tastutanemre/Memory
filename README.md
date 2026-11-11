@@ -56,7 +56,7 @@ Devin Desktop'ta MCP prompt'ları `/mcp__mem__start`, `/mcp__mem__decide`, `/mcp
 
 ```text
 .mem-vault.json  projects.json  dlp-patterns.txt  Core.md  Kurallar.md
-projects/<slug>/{Genel-Bakis,Kurallar,Acik-Konular,Son-Oturum}.md  projects/<slug>/kararlar/YYYY-MM-DD-*.md
+projects/<slug>/{<ProjeAdi>,Kurallar,Acik-Konular,Son-Oturum}.md  projects/<slug>/kararlar/YYYY-MM-DD-*.md
 knowledge/  receipts/YYYY-MM/<hash16>.md  archive/YYYY-MM.md
 ```
 
