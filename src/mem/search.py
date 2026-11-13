@@ -12,6 +12,9 @@ KIND_BOOST = 1.15
 GRAPH_BONUS = 0.10
 GRAPH_TOP_N = 3
 CANDIDATE_LIMIT = 300
+RERANK_POOL_MIN = 24
+RECOVERY_POOL = 24
+RECOVERY_SCORE = 0.05
 
 
 @runtime_checkable
@@ -24,6 +27,10 @@ class SemanticReranker(Protocol):
 class NoOpReranker:
     def rerank(self, query: str, results: list[dict]) -> list[dict]:
         return results
+
+
+def _is_active(reranker) -> bool:
+    return reranker is not None and not isinstance(reranker, NoOpReranker)
 
 
 def _excerpt(body: str, query: str, width: int = 320) -> str:
@@ -87,6 +94,7 @@ def search_vault(
     )
     params.append(CANDIDATE_LIMIT)
     rows = conn.execute(sql, params).fetchall()
+    scope_where, scope_params = where[1:], params[1:-1]
 
     best: dict[str, dict] = {}
     for r in rows:
@@ -134,8 +142,55 @@ def search_vault(
         results.sort(key=lambda x: x["updated_at"], reverse=True)
         results.sort(key=lambda x: -x["score"])
 
-    results = results[: max(1, int(limit))]
-    results = (reranker or NoOpReranker()).rerank(query, results)
+    cap = max(1, int(limit))
+    if not _is_active(reranker):
+        results = results[:cap]
+        results = (reranker or NoOpReranker()).rerank(query, results)
+        for r in results:
+            r["score"] = round(r["score"], 8)
+        return results
+
+    # Aktif anlamsal reranker: kesim reranker'dan SONRA yapilir; sifir/az kelime ortusmesinde
+    # ayni kapsamdaki en guncel belgeler "lexical_hit": False aday olarak havuza eklenir.
+    if len(results) < cap:
+        results.extend(_recovery_candidates(conn, scope_where, scope_params, best, query))
+    pool = results[: min(len(results), max(cap * 3, RERANK_POOL_MIN))]
+    results = list(reranker.rerank(query, pool))[:cap]
     for r in results:
+        r.pop("lexical_hit", None)
         r["score"] = round(r["score"], 8)
     return results
+
+
+def _recovery_candidates(conn, scope_where: list[str], scope_params: list, best: dict[str, dict],
+                         query: str) -> list[dict]:
+    """FTS'te eslesmeyen ama kapsam filtrelerinden gecen en guncel belgeleri (ilk pasajla) dondurur."""
+    sql = (
+        "SELECT d.doc_id, d.title, d.kind, d.project, d.status, d.trust, d.updated_at, "
+        "p.heading_path, p.body FROM documents d "
+        "JOIN passages p ON p.doc_id = d.doc_id "
+        "AND p.ord = (SELECT MIN(p2.ord) FROM passages p2 WHERE p2.doc_id = d.doc_id) "
+        "WHERE " + (" AND ".join(scope_where) or "1=1") + " "
+        "ORDER BY (d.kind = 'receipt'), d.updated_at DESC, d.doc_id LIMIT ?"
+    )
+    rows = conn.execute(sql, [*scope_params, RECOVERY_POOL + len(best)]).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        if r["doc_id"] in best:
+            continue
+        out.append({
+            "doc_id": r["doc_id"],
+            "title": r["title"],
+            "kind": r["kind"],
+            "project": r["project"],
+            "status": r["status"],
+            "trust": r["trust"],
+            "heading_path": r["heading_path"],
+            "snippet": _excerpt(r["body"], query),
+            "score": RECOVERY_SCORE,
+            "updated_at": r["updated_at"] or "",
+            "lexical_hit": False,
+        })
+        if len(out) >= RECOVERY_POOL:
+            break
+    return out

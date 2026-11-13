@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from . import config, dlp, store
 from .config import VAULT_SCOPE
@@ -26,6 +27,7 @@ from .search import search_vault
 from .turkish import fold_tr
 
 __all__ = [
+    "DecisionAdvisor",
     "VaultError",
     "ConcurrencyConflictError",
     "PathTraversalError",
@@ -53,6 +55,27 @@ LINKS_END = "<!-- /mem-links -->"
 
 class VaultError(ValueError):
     """Kasa islemi gecersiz."""
+
+
+@runtime_checkable
+class DecisionAdvisor(Protocol):
+    """Opsiyonel harici karar danismani kancasi (yalniz personal/non-block profillerde baglanir).
+
+    `warnings` dolu bir sozluk donerse karar yazilmaz (advisor_warning); `None` her zaman guvenlidir.
+    """
+
+    def assess_decision(self, proposal: dict, priors: list[dict]) -> dict | None: ...
+
+
+ADVISOR_PRIOR_LIMIT = 8
+
+
+def _gate_external(ctx: "_Ctx", reranker):
+    """Savunma derinligi: work/block kasada harici (is_external) reranker asla kullanilmaz."""
+    if reranker is not None and getattr(reranker, "is_external", False) \
+            and not config.can_use_advisor(ctx.profile, ctx.dlp_mode):
+        return None
+    return reranker
 
 
 def _now() -> datetime:
@@ -205,20 +228,22 @@ _DLP_PATTERNS = """# Şirkete özel DLP desenleri (her satır bir desen; # yorum
 """
 
 
-def init_vault(vault_root, profile_name: str, dlp_mode: str | None = None, state_dir=None) -> dict:
+def init_vault(vault_root, profile_name: str, dlp_mode: str | None = None, state_dir=None,
+               advisor: str | None = None) -> dict:
     if not config.PROFILE_NAME_RE.match(profile_name or ""):
         raise VaultError(f"Gecersiz profil adi: {profile_name!r}")
     root = Path(os.path.abspath(str(vault_root)))
     mode = dlp_mode or config.default_dlp_mode(profile_name)
     if mode not in config.DLP_MODES:
         raise VaultError(f"Gecersiz dlp_mode: {mode!r}")
+    adv = config.validate_advisor_mode(advisor, profile_name, mode)
     created: list[str] = []
     root.mkdir(parents=True, exist_ok=True)
     meta_path = config.vault_meta_path(root)
     if not meta_path.exists():
         sdir_check = Path(state_dir) if state_dir else config.default_state_dir(profile_name)
         config.ensure_state_outside(root, sdir_check)
-        atomic_write_text(meta_path, json.dumps(config.new_vault_meta(profile_name, mode), indent=2) + "\n")
+        atomic_write_text(meta_path, json.dumps(config.new_vault_meta(profile_name, mode, adv), indent=2) + "\n")
         created.append(".mem-vault.json")
     ctx = _ctx(root, state_dir)
     if not config.projects_file(root).exists():
@@ -493,7 +518,8 @@ def search_memory(vault_root, query: str, project: str | None = None, limit: int
         store.sync_vault(conn, ctx.vault_root)
         return search_vault(conn, query, project=project, limit=limit,
                             include_superseded=include_superseded,
-                            include_archived=include_archived, kinds=klist, reranker=reranker)
+                            include_archived=include_archived, kinds=klist,
+                            reranker=_gate_external(ctx, reranker))
     finally:
         conn.close()
 
@@ -567,7 +593,7 @@ def _trim_tail(text: str, limit: int) -> str:
 
 
 def bootstrap_context(vault_root, state_dir=None, cwd=None, project: str | None = None,
-                      task_hint: str | None = None, budget_chars: int = 8000) -> dict:
+                      task_hint: str | None = None, budget_chars: int = 8000, reranker=None) -> dict:
     root = Path(os.path.abspath(str(vault_root)))
     scope = resolve_scope(root, cwd=cwd, project=project)
     if scope["status"] != "ok":
@@ -592,7 +618,8 @@ def bootstrap_context(vault_root, state_dir=None, cwd=None, project: str | None 
             skip = {"Core.md", "Kurallar.md"}
             if slug:
                 skip |= {f"projects/{slug}/{n}" for n in ("Kurallar.md", "Acik-Konular.md", "Son-Oturum.md")}
-            for r in search_vault(conn, task_hint, project=slug, limit=10):
+            for r in search_vault(conn, task_hint, project=slug, limit=10,
+                                  reranker=_gate_external(ctx, reranker)):
                 if r["doc_id"] in skip:
                     continue
                 relevant.append({k: r[k] for k in ("doc_id", "title", "kind", "heading_path", "snippet", "score")})
@@ -674,7 +701,8 @@ def _resolve_ref(sess: _Session, ref: str, folder: str) -> str:
 def record_decision(vault_root, project: str | None, title: str, decision: str, context: str = "",
                     alternatives: str = "", rationale: str = "", supersedes: list[str] | None = None,
                     sources: list[str] | None = None, tags: list[str] | None = None,
-                    force: bool = False, state_dir=None, actor: str = "mem") -> dict:
+                    force: bool = False, state_dir=None, actor: str = "mem",
+                    advisor: DecisionAdvisor | None = None) -> dict:
     if not (title or "").strip() or not (decision or "").strip():
         raise VaultError("title ve decision zorunlu.")
     ctx = _ctx(vault_root, state_dir)
@@ -717,6 +745,12 @@ def record_decision(vault_root, project: str | None, title: str, decision: str, 
                         "message": "Benzer aktif karar zaten var. Yerine geçiyorsa supersedes ver; "
                                    "yine de yazmak için force=true kullan.",
                     }
+
+        if not force and advisor is not None and config.can_use_advisor(ctx.profile, ctx.dlp_mode):
+            warned = _advisor_review(sess, advisor, slug, title, decision, context, alternatives,
+                                     rationale, set(old_ids))
+            if warned is not None:
+                return warned
 
         folder = f"projects/{slug}/kararlar" if slug else "knowledge/kararlar"
         date = now.strftime("%Y-%m-%d")
@@ -771,6 +805,50 @@ def record_decision(vault_root, project: str | None, title: str, decision: str, 
             _refresh_hub(sess, slug)
             sess.sync()
     return {"status": "created", "path": doc_id, "sha256": sha, "superseded": old_ids, "dlp_categories": cats}
+
+
+def _advisor_review(sess: _Session, advisor: DecisionAdvisor, slug: str | None, title: str, decision: str,
+                    context: str, alternatives: str, rationale: str, skip_ids: set[str]) -> dict | None:
+    """Harici danismana yalniz DLP-temiz taslak + onceki kararlari sorar; hata = fail-open (None)."""
+    vault_root = sess.ctx.vault_root
+    proposal = {"project": slug, "title": title, "decision": decision, "context": context,
+                "alternatives": alternatives, "rationale": rationale}
+    if any(dlp.scan(v, vault_root) for v in proposal.values() if isinstance(v, str) and v):
+        return None
+    rows = sess.conn.execute(
+        "SELECT doc_id, title FROM documents WHERE kind='decision' AND status='active' AND project IS ? "
+        "AND doc_id NOT IN (SELECT older_doc_id FROM supersedes) ORDER BY updated_at DESC LIMIT ?",
+        (slug, ADVISOR_PRIOR_LIMIT),
+    ).fetchall()
+    priors: list[dict] = []
+    for r in rows:
+        if r["doc_id"] in skip_ids:
+            continue
+        try:
+            body = sess.read(r["doc_id"])
+        except OSError:
+            continue
+        prior = {"doc_id": r["doc_id"], "title": r["title"], "decision": _field(body, "Karar"),
+                 "rationale": _field(body, "Gerekçe")}
+        if any(dlp.scan(v, vault_root) for v in (prior["title"], prior["decision"], prior["rationale"]) if v):
+            continue
+        priors.append(prior)
+    try:
+        adv = advisor.assess_decision(proposal, priors)
+    except Exception:  # noqa: BLE001 - harici danisman hatasi karar kaydini asla engellememeli
+        return None
+    if isinstance(adv, dict) and isinstance(adv.get("warnings"), list) and adv["warnings"]:
+        return {
+            "status": "advisor_warning",
+            "warnings": adv["warnings"],
+            "existing": adv.get("existing"),
+            "message": adv.get("message") or (
+                "Danışman uyarısı: Karar taslağı mevcut bir kararla çelişiyor/örtüşüyor veya henüz "
+                "kesinleşmemiş görünüyor. Eski kararın yerine geçiyorsa supersedes ver; "
+                "yine de yazmak için force=true kullan."
+            ),
+        }
+    return None
 
 
 # ---------------------------------------------------------------- kural

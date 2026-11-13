@@ -141,10 +141,13 @@ def _json_load(path: Path, text: str | None) -> dict:
     return data
 
 
-def _mcp_entry(profile_name: str, mem_py: Path, python: str, vault_scope: bool = False) -> dict:
+def _mcp_entry(profile_name: str, mem_py: Path, python: str, vault_scope: bool = False,
+               advisor: str | None = None) -> dict:
     args = [str(mem_py), "mcp", "--profile", profile_name]
     if vault_scope:
         args.append("--vault-scope")
+    if advisor == "gemini":
+        args += ["--advisor", "gemini"]
     return {"command": python, "args": args}
 
 
@@ -158,12 +161,20 @@ def _toml_block(entry: dict) -> str:
 
 
 def connect_harness(harness: str, profile_name: str, config_root_override=None, dry_run: bool = False,
-                    uninstall: bool = False, mem_py_path=None, python_exe: str | None = None) -> dict:
-    """MCP kaydi + global kural blogu yazar (veya uninstall ile yalniz kendi kayitlarini kaldirir)."""
+                    uninstall: bool = False, mem_py_path=None, python_exe: str | None = None,
+                    advisor: str | None = None) -> dict:
+    """MCP kaydi + global kural blogu yazar (veya uninstall ile yalniz kendi kayitlarini kaldirir).
+
+    `advisor="gemini"` yalniz acikca verilirse ve profil `work` degilse MCP argumanlarina eklenir.
+    """
+    if advisor not in (None, "", "off", "gemini"):
+        raise ValueError(f"Gecersiz advisor modu: {advisor!r}")
+    if advisor == "gemini" and (profile_name or "").strip().lower() == "work":
+        raise ValueError("`work` profili harici danisman (advisor) ile baglanamaz; hava bosluklu kalir.")
     t = _targets(harness, config_root_override)
     mem_py = Path(mem_py_path) if mem_py_path else default_mem_py()
     entry = _mcp_entry(profile_name, mem_py, python_exe or sys.executable,
-                       vault_scope=bool(t.get("vault_scope")))
+                       vault_scope=bool(t.get("vault_scope")), advisor=advisor)
     files: list[dict] = []
 
     # --- MCP kaydi

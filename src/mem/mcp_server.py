@@ -51,7 +51,8 @@ TOOLS = [
     },
     {
         "name": "memory_decide",
-        "description": "Mimari/ürün kararını ADR olarak kaydeder. Mükerrerse duplicate_warning döner (force=true ile zorlanır). "
+        "description": "Mimari/ürün kararını ADR olarak kaydeder. Mükerrerse duplicate_warning (opsiyonel danışman açıksa "
+                       "çelişki/kesinleşmemiş için advisor_warning) döner (force=true ile zorlanır). "
                        "Eski kararı geçersiz kılmak için supersedes ver.",
         "inputSchema": _obj({"title": _STR, "decision": _STR, "context": _STR, "alternatives": _STR, "rationale": _STR,
                              "supersedes": _STR_LIST, "sources": _STR_LIST, "tags": _STR_LIST,
@@ -113,10 +114,16 @@ def _text(payload, is_error: bool = False) -> dict:
 
 class McpServer:
     def __init__(self, vault_root, state_dir=None, default_cwd: str | None = None,
-                 vault_scope: bool = False):
+                 vault_scope: bool = False, advisor_mode: str | None = None):
         self.vault_root = Path(vault_root)
         self.state_dir = state_dir
         self.vault_scope = vault_scope
+        # Opsiyonel harici danisman: yalniz acik istek/MEM_ADVISOR/profil ayari VE personal+non-block ise.
+        # work profilinde acik istek ValueError verir; ortam/profil kaynakli istek sessizce kapali kalir.
+        self.reranker = None
+        self.advisor = None
+        if config.effective_advisor_mode(self.vault_root, advisor_mode) == "gemini":
+            self.reranker, self.advisor = _build_gemini(self.vault_root, state_dir)
         self.default_cwd = str(self.vault_root) if vault_scope else (
             default_cwd if default_cwd is not None else os.getcwd()
         )
@@ -180,7 +187,8 @@ class McpServer:
             if scope["status"] != "ok":
                 return self._refuse(scope)
             res = vault.bootstrap_context(vr, sd, project=scope["project"], task_hint=a.get("task_hint"),
-                                          budget_chars=int(a.get("budget_chars") or 8000))
+                                          budget_chars=int(a.get("budget_chars") or 8000),
+                                          reranker=self.reranker)
             return _text(res["text"])
         shared = name == "memory_decide" and (a.get("shared") is True or a.get("project") == "shared")
         scope = self._scope({**a, "project": None if shared else a.get("project")})
@@ -193,7 +201,8 @@ class McpServer:
                 raise ValueError("query zorunlu")
             res = vault.search_memory(vr, q, project=slug, limit=int(a.get("limit") or 8),
                                       include_superseded=bool(a.get("include_superseded")),
-                                      include_archived=bool(a.get("include_archived")), state_dir=sd)
+                                      include_archived=bool(a.get("include_archived")), state_dir=sd,
+                                      reranker=self.reranker)
             return _text({"status": "ok", "count": len(res), "results": res})
         if name == "memory_read":
             return _text(vault.read_note(vr, _req(a, "path"), project=slug, state_dir=sd))
@@ -202,7 +211,7 @@ class McpServer:
                 vr, None if shared else slug, _req(a, "title"), _req(a, "decision"), context=a.get("context") or "",
                 alternatives=a.get("alternatives") or "", rationale=a.get("rationale") or "",
                 supersedes=a.get("supersedes"), sources=a.get("sources"), tags=a.get("tags"),
-                force=bool(a.get("force")), state_dir=sd, actor="mcp"))
+                force=bool(a.get("force")), state_dir=sd, actor="mcp", advisor=self.advisor))
         if name == "memory_rule":
             rscope = a.get("scope") or slug or "global"
             if scope["scope"] == "project" and rscope not in ("global", slug):
@@ -306,6 +315,15 @@ class McpServer:
         raise _RpcError(-32601, f"Method not found: {method}")
 
 
+def _build_gemini(vault_root: Path, state_dir):
+    """Gemini yan adaptorunu yalniz gerektiginde (gec) import eder; cekirdek ag kodu icermez."""
+    from mem_advisor.gemini_decisions import build_for_profile
+
+    name, dlp_mode = config.advisor_identity(vault_root)
+    sdir = config.resolve_state_dir(vault_root, state_dir)
+    return build_for_profile("gemini", vault_root, sdir, name, dlp_mode)
+
+
 class _RpcError(Exception):
     def __init__(self, code: int, message: str):
         super().__init__(message)
@@ -405,12 +423,13 @@ def serve(server: McpServer, inp, out) -> None:
             _write_message(out, reply, mode)
 
 
-def run_stdio(vault_root, state_dir=None, vault_scope: bool = False) -> int:
+def run_stdio(vault_root, state_dir=None, vault_scope: bool = False, advisor_mode: str | None = None) -> int:
     """Gercek stdio: stdout ikili ve yalniz protokol; sapan print'ler stderr'e yonlendirilir."""
+    # Sunucu once kurulur: gecersiz advisor istegi (ör. work + gemini) akislara dokunmadan ValueError verir.
+    server = McpServer(vault_root, state_dir, vault_scope=vault_scope, advisor_mode=advisor_mode)
     out = sys.stdout.buffer
     inp = sys.stdin.buffer
     sys.stdout = sys.stderr
-    server = McpServer(vault_root, state_dir, vault_scope=vault_scope)
     try:
         serve(server, inp, out)
     except (BrokenPipeError, KeyboardInterrupt):
@@ -419,11 +438,11 @@ def run_stdio(vault_root, state_dir=None, vault_scope: bool = False) -> int:
 
 
 def main_for_profile(profile_name: str | None = None, vault_root=None, state_dir=None,
-                     vault_scope: bool = False) -> int:
+                     vault_scope: bool = False, advisor_mode: str | None = None) -> int:
     if vault_root:
         root = Path(vault_root)
         sdir = config.resolve_state_dir(root, state_dir)
     else:
         prof = config.get_profile(profile_name)
         root, sdir = Path(prof.vault_root), Path(prof.state_dir)
-    return run_stdio(root, sdir, vault_scope=vault_scope)
+    return run_stdio(root, sdir, vault_scope=vault_scope, advisor_mode=advisor_mode)

@@ -32,6 +32,20 @@ def _vault_ctx(args) -> tuple[Path, Path | None]:
     return Path(prof.vault_root), Path(prof.state_dir)
 
 
+def _advisor_hooks(args, root: Path, sd: Path | None):
+    """(reranker, advisor): yalniz acik istek/MEM_ADVISOR/profil ayari + personal/non-block ise baglanir."""
+    explicit = getattr(args, "advisor", None)
+    if explicit == "off":
+        return None, None
+    mode = config.effective_advisor_mode(root, explicit)  # work + --advisor gemini -> ValueError
+    if mode != "gemini":
+        return None, None
+    from mem_advisor.gemini_decisions import build_for_profile
+
+    name, dlp_mode = config.advisor_identity(root)
+    return build_for_profile(mode, root, config.resolve_state_dir(root, sd), name, dlp_mode)
+
+
 def _scope_or_exit(args, root: Path):
     project = getattr(args, "project", None)
     explicit_cwd = getattr(args, "cwd", None)
@@ -51,9 +65,10 @@ def cmd_init(args) -> int:
     name = args.profile or "work"
     root = Path(args.vault) if args.vault else config.default_vault_dir(name)
     mode = args.dlp
-    prof = config.create_profile(name, root, dlp_mode=mode)
-    res = vault.init_vault(root, name, dlp_mode=prof.dlp_mode, state_dir=prof.state_dir)
-    _out(args, res, f"Kasa hazır: {res['vault_root']}\nProfil: {name} (dlp: {res['dlp_mode']})\n"
+    prof = config.create_profile(name, root, dlp_mode=mode, advisor=args.advisor)
+    res = vault.init_vault(root, name, dlp_mode=prof.dlp_mode, state_dir=prof.state_dir, advisor=prof.advisor)
+    _out(args, res, f"Kasa hazır: {res['vault_root']}\nProfil: {name} (dlp: {res['dlp_mode']}"
+                    f"{', advisor: ' + prof.advisor if prof.advisor != 'off' else ''})\n"
                     f"State: {res['state_dir']}\nOluşturulan: {', '.join(res['created']) or '-'}")
     return EXIT_OK
 
@@ -80,10 +95,16 @@ def cmd_decide(args) -> int:
     scope = _scope_or_exit(args, root)
     if scope["status"] != "ok":
         return _unregistered(args, scope)
+    _reranker, advisor = _advisor_hooks(args, root, sd)
     res = vault.record_decision(
         root, None if args.shared else scope["project"], args.title, args.decision, context=args.context or "",
         alternatives=args.alternatives or "", rationale=args.rationale or "", supersedes=args.supersedes,
-        sources=args.source, tags=args.tag, force=args.force, state_dir=sd, actor="cli")
+        sources=args.source, tags=args.tag, force=args.force, state_dir=sd, actor="cli",
+        advisor=advisor)
+    if res["status"] == "advisor_warning":
+        warn_lines = "\n".join(f"  - {w}" for w in res["warnings"])
+        _out(args, res, f"DANIŞMAN UYARISI: {res['message']}\n{warn_lines}\nMevcut: {res.get('existing') or '-'}")
+        return EXIT_OK
     if res["status"] == "duplicate_warning":
         _out(args, res, f"UYARI: {res['message']}\nMevcut: {res['existing']}")
         return EXIT_OK
@@ -110,9 +131,10 @@ def cmd_search(args) -> int:
     scope = _scope_or_exit(args, root)
     if scope["status"] != "ok":
         return _unregistered(args, scope)
+    reranker, _advisor = _advisor_hooks(args, root, sd)
     res = vault.search_memory(root, " ".join(args.query), project=scope["project"], limit=args.limit,
                               include_superseded=args.include_superseded,
-                              include_archived=args.include_archived, state_dir=sd)
+                              include_archived=args.include_archived, state_dir=sd, reranker=reranker)
     lines = []
     for i, r in enumerate(res, 1):
         lines.append(f"{i}. [{r['kind']}] {r['title']}  ({r['doc_id']})  skor={r['score']:.4g}\n   {r['snippet']}")
@@ -135,8 +157,9 @@ def cmd_bootstrap(args) -> int:
     scope = _scope_or_exit(args, root)
     if scope["status"] != "ok":
         return _unregistered(args, scope)
+    reranker, _advisor = _advisor_hooks(args, root, sd)
     res = vault.bootstrap_context(root, sd, project=scope["project"], task_hint=args.task,
-                                  budget_chars=args.budget)
+                                  budget_chars=args.budget, reranker=reranker)
     _out(args, res, res["text"])
     return EXIT_OK
 
@@ -174,7 +197,8 @@ def cmd_sync(args) -> int:
 
 def cmd_connect(args) -> int:
     res = harness.connect_harness(args.harness, args.profile or "work", config_root_override=args.config_root,
-                                  dry_run=args.dry_run, uninstall=args.uninstall)
+                                  dry_run=args.dry_run, uninstall=args.uninstall,
+                                  advisor=args.advisor)
     lines = [f"{f['action']:10} {f['path']}" for f in res["files"]]
     _out(args, res, "\n".join(lines))
     return EXIT_OK
@@ -192,13 +216,47 @@ def cmd_import_v3(args) -> int:
 
 def cmd_mcp(args) -> int:
     from .mcp_server import main_for_profile
-    return main_for_profile(args.profile, vault_root=args.vault, vault_scope=args.vault_scope)
+    return main_for_profile(args.profile, vault_root=args.vault, vault_scope=args.vault_scope,
+                            advisor_mode=args.advisor)
 
 
 def cmd_profiles(args) -> int:
-    ps = [{"name": p.name, "vault_root": p.vault_root, "state_dir": p.state_dir, "dlp_mode": p.dlp_mode}
-          for p in config.list_profiles()]
-    _out(args, ps, "\n".join(f"{p['name']}\t{p['dlp_mode']}\t{p['vault_root']}" for p in ps) or "(profil yok)")
+    ps = [{"name": p.name, "vault_root": p.vault_root, "state_dir": p.state_dir, "dlp_mode": p.dlp_mode,
+           "advisor": p.advisor} for p in config.list_profiles()]
+    _out(args, ps, "\n".join(f"{p['name']}\t{p['dlp_mode']}\tadvisor={p['advisor']}\t{p['vault_root']}"
+                             for p in ps) or "(profil yok)")
+    return EXIT_OK
+
+
+def cmd_advisor(args) -> int:
+    """Opsiyonel Gemini Decisions danismani: durum / ac / kapat / API anahtari (gizli, argv'siz)."""
+    from mem_advisor.gemini_decisions import advisor_status, save_advisor_settings
+
+    action = args.advisor_cmd
+    if action == "set-key":
+        if args.clear:
+            save_advisor_settings(clear_key=True)
+            _out(args, {"status": "cleared"}, "API anahtarı advisor.json'dan silindi.")
+            return EXIT_OK
+        if args.stdin:
+            key = sys.stdin.readline()
+        else:
+            var = args.from_env
+            key = os.environ.get(var) or ""
+            if not key.strip():
+                raise ValueError(f"Ortam değişkeni boş veya tanımsız: {var}")
+        save_advisor_settings(gemini_api_key=key)
+        _out(args, {"status": "saved"}, "API anahtarı kaydedildi (değeri hiçbir yerde gösterilmez).")
+        return EXIT_OK
+    prof = config.get_profile(getattr(args, "profile", None))
+    if action == "enable":
+        prof = config.set_profile_advisor(prof.name, "gemini")
+    elif action == "disable":
+        prof = config.set_profile_advisor(prof.name, "off")
+    st = {"profile": prof.name, **advisor_status(prof.name, prof.dlp_mode, prof.advisor)}
+    _out(args, st, f"profil={st['profile']} advisor={st['mode']} izinli={st['allowed']} "
+                   f"anahtar={'var (' + str(st['key_source']) + ')' if st['key_configured'] else 'yok'} "
+                   f"model={st['model']}")
     return EXIT_OK
 
 
@@ -221,6 +279,10 @@ def cmd_doctor(args) -> int:
         mode = meta.get("dlp_mode")
         add("PASS", ".mem-vault.json", f"profil={meta.get('profile')} dlp={mode}")
         add("FAIL" if mode == "off" else "PASS", "DLP kalkanı açık", f"mod={mode}")
+        adv_mode = config.effective_advisor_mode(root)
+        add("PASS", "Harici danışman (advisor)",
+            f"mod={adv_mode}" + ("" if config.can_use_advisor(meta.get("profile") or "", mode)
+                                  else " (work/block: hava boşluklu)"))
         sdir = config.resolve_state_dir(root, sd)
         add("PASS", "state_dir kasa dışında", str(sdir))
     except ValueError as exc:
@@ -278,6 +340,10 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--vault", help="kasa yolunu doğrudan ver (profil yerine)")
     common.add_argument("--json", action="store_true", help="JSON çıktı")
 
+    advisor_opt = argparse.ArgumentParser(add_help=False)
+    advisor_opt.add_argument("--advisor", choices=config.ADVISOR_MODES,
+                             help="harici danışman (varsayılan: profil ayarı / MEM_ADVISOR; work'te reddedilir)")
+
     scoped = argparse.ArgumentParser(add_help=False)
     scoped.add_argument("--project", help="proje slug'ı (cwd yerine)")
     scoped.add_argument("--cwd", help="çalışma alanı yolu (varsayılan: geçerli dizin)")
@@ -288,6 +354,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("init", parents=[common], help="kasa ve profil oluştur")
     s.add_argument("--dlp", choices=("block", "redact"), help="DLP modu (work: block, diğer: redact)")
+    s.add_argument("--advisor", choices=config.ADVISOR_MODES,
+                   help="opsiyonel Gemini Decisions danışmanı (yalnız work olmayan/block olmayan profiller)")
     s.set_defaults(func=cmd_init)
 
     pr = sub.add_parser("project", help="proje beyaz listesi")
@@ -301,7 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = psub.add_parser("list", parents=[common], help="kayıtlı projeler")
     s.set_defaults(func=cmd_project_list)
 
-    s = sub.add_parser("decide", parents=[common, scoped], help="karar (ADR) kaydet")
+    s = sub.add_parser("decide", parents=[common, scoped, advisor_opt], help="karar (ADR) kaydet")
     s.add_argument("--title", required=True)
     s.add_argument("--decision", required=True)
     s.add_argument("--context")
@@ -320,7 +388,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--scope", help="'global' veya proje slug'ı")
     s.set_defaults(func=cmd_rule)
 
-    s = sub.add_parser("search", parents=[common, scoped], help="hafızada ara")
+    s = sub.add_parser("search", parents=[common, scoped, advisor_opt], help="hafızada ara")
     s.add_argument("query", nargs="+")
     s.add_argument("--limit", type=int, default=8)
     s.add_argument("--include-superseded", action="store_true")
@@ -331,7 +399,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("path")
     s.set_defaults(func=cmd_read)
 
-    s = sub.add_parser("bootstrap", parents=[common, scoped], help="oturum bağlamı")
+    s = sub.add_parser("bootstrap", parents=[common, scoped, advisor_opt], help="oturum bağlamı")
     s.add_argument("--task", help="görev ipucu")
     s.add_argument("--budget", type=int, default=6000)
     s.set_defaults(func=cmd_bootstrap)
@@ -357,7 +425,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("doctor", parents=[common], help="kurulum sağlık denetimi")
     s.set_defaults(func=cmd_doctor)
 
-    s = sub.add_parser("connect", parents=[common], help="Devin/Antigravity/Claude/Codex bağla")
+    s = sub.add_parser("connect", parents=[common, advisor_opt], help="Devin/Antigravity/Claude/Codex bağla")
     s.add_argument("harness", choices=harness.HARNESSES)
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--uninstall", action="store_true")
@@ -372,7 +440,20 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("profiles", parents=[common], help="kayıtlı profiller")
     s.set_defaults(func=cmd_profiles)
 
-    s = sub.add_parser("mcp", parents=[common], help="MCP stdio sunucusu")
+    s = sub.add_parser("advisor", help="opsiyonel Gemini Decisions danışmanı (yalnız personal)")
+    asub = s.add_subparsers(dest="advisor_cmd", required=True)
+    for nm, hlp in (("status", "durum"), ("enable", "profilde aç"), ("disable", "profilde kapat")):
+        a = asub.add_parser(nm, parents=[common], help=hlp)
+        a.set_defaults(func=cmd_advisor)
+    a = asub.add_parser("set-key", parents=[common], help="API anahtarını advisor.json'a kaydet (argv'de düz metin yok)")
+    grp = a.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--stdin", action="store_true", help="anahtarı stdin'in ilk satırından oku")
+    grp.add_argument("--from-env", nargs="?", const="GEMINI_API_KEY", metavar="VAR",
+                     help="anahtarı bu ortam değişkeninden oku (varsayılan: GEMINI_API_KEY)")
+    grp.add_argument("--clear", action="store_true", help="kayıtlı anahtarı sil")
+    a.set_defaults(func=cmd_advisor)
+
+    s = sub.add_parser("mcp", parents=[common, advisor_opt], help="MCP stdio sunucusu")
     s.add_argument("--vault-scope", action="store_true",
                    help="masaüstü sohbet istemcileri (ör. Claude Desktop) için varsayılan kapsamı kasa kökü yap")
     s.set_defaults(func=cmd_mcp)

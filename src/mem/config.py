@@ -12,6 +12,7 @@ from pathlib import Path
 from .lock import atomic_write_text, read_text_retry
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 DLP_MODES = ("block", "redact", "off")
+ADVISOR_MODES = ("off", "gemini")
 VAULT_SCOPE = "_vault"
 
 
@@ -25,13 +26,17 @@ class Profile:
     vault_root: str
     state_dir: str
     dlp_mode: str
+    advisor: str = "off"
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "vault_root": self.vault_root,
             "state_dir": self.state_dir,
             "dlp_mode": self.dlp_mode,
         }
+        if self.advisor != "off":  # eski profiles.json bicimi korunur
+            data["advisor"] = self.advisor
+        return data
 
 
 # ---------------------------------------------------------------- yollar
@@ -53,6 +58,11 @@ def profiles_path() -> Path:
 
 def default_state_dir(profile_name: str) -> Path:
     return mem_home() / "state" / profile_name
+
+
+def advisor_config_path() -> Path:
+    """Harici danisman ayarlari (API anahtari dahil); kasa DISINDA, MEM_HOME altinda."""
+    return mem_home() / "advisor.json"
 
 
 def default_vault_dir(profile_name: str) -> Path:
@@ -92,6 +102,24 @@ def default_dlp_mode(profile_name: str) -> str:
     return "block" if profile_name == "work" else "redact"
 
 
+def can_use_advisor(profile_name: str, dlp_mode: str) -> bool:
+    """Harici danisman YALNIZ `work` olmayan ve dlp_mode != block profillerde acilabilir."""
+    return (profile_name or "").strip().lower() != "work" and dlp_mode != "block"
+
+
+def validate_advisor_mode(advisor: str | None, profile_name: str, dlp_mode: str) -> str:
+    """None/bos -> "off"; gecersiz mod veya yasakli profil/DLP birlesimi ValueError."""
+    mode = (advisor or "off").strip().lower() or "off"
+    if mode not in ADVISOR_MODES:
+        raise ValueError(f"Gecersiz advisor modu: {advisor!r} (izinli: {ADVISOR_MODES})")
+    if mode != "off" and not can_use_advisor(profile_name, dlp_mode):
+        raise ValueError(
+            "Harici danisman (advisor) `work` profilinde veya dlp_mode=block kasalarda kullanilamaz; "
+            "bu profiller hava bosluklu kalir."
+        )
+    return mode
+
+
 # ---------------------------------------------------------------- profiller
 
 
@@ -114,6 +142,11 @@ def _save_registry(data: dict) -> None:
     atomic_write_text(profiles_path(), json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 
+def _stored_advisor(entry: dict) -> str:
+    val = entry.get("advisor") or "off"
+    return val if val in ADVISOR_MODES else "off"
+
+
 def list_profiles() -> list[Profile]:
     data = _load_registry()
     out = []
@@ -124,12 +157,14 @@ def list_profiles() -> list[Profile]:
                 vault_root=p["vault_root"],
                 state_dir=p.get("state_dir") or str(default_state_dir(name)),
                 dlp_mode=p.get("dlp_mode") or default_dlp_mode(name),
+                advisor=_stored_advisor(p),
             )
         )
     return out
 
 
-def create_profile(name: str, vault_root, state_dir=None, dlp_mode: str | None = None) -> Profile:
+def create_profile(name: str, vault_root, state_dir=None, dlp_mode: str | None = None,
+                   advisor: str | None = None) -> Profile:
     if not PROFILE_NAME_RE.match(name or ""):
         raise ProfileError(f"Gecersiz profil adi: {name!r}")
     mode = dlp_mode or default_dlp_mode(name)
@@ -137,13 +172,32 @@ def create_profile(name: str, vault_root, state_dir=None, dlp_mode: str | None =
         raise ValueError(f"Gecersiz dlp_mode: {mode!r}")
     vroot = os.path.abspath(str(vault_root))
     sdir = os.path.abspath(str(state_dir)) if state_dir else str(default_state_dir(name))
+    adv = validate_advisor_mode(advisor, name, mode)
     ensure_state_outside(vroot, sdir)
     data = _load_registry()
-    data["profiles"][name] = {"vault_root": vroot, "state_dir": sdir, "dlp_mode": mode}
+    prof = Profile(name, vroot, sdir, mode, adv)
+    data["profiles"][name] = prof.to_dict()
     if not data.get("default"):
         data["default"] = name
     _save_registry(data)
-    return Profile(name, vroot, sdir, mode)
+    return prof
+
+
+def set_profile_advisor(name: str, advisor: str) -> Profile:
+    """Kayitli profilin advisor modunu kalici degistirir (work/block icin gemini reddedilir)."""
+    data = _load_registry()
+    entry = data["profiles"].get(name)
+    if entry is None:
+        raise ProfileError(f"Profil bulunamadi: {name!r}. Kayitli profiller: {sorted(data['profiles'])}")
+    mode = entry.get("dlp_mode") or default_dlp_mode(name)
+    adv = validate_advisor_mode(advisor, name, mode)
+    if adv == "off":
+        entry.pop("advisor", None)
+    else:
+        entry["advisor"] = adv
+    _save_registry(data)
+    state = entry.get("state_dir") or str(default_state_dir(name))
+    return Profile(name, entry["vault_root"], state, mode, adv)
 
 
 def get_profile(name: str | None = None) -> Profile:
@@ -160,7 +214,8 @@ def get_profile(name: str | None = None) -> Profile:
     p = profiles[wanted]
     state = p.get("state_dir") or str(default_state_dir(wanted))
     ensure_state_outside(p["vault_root"], state)
-    return Profile(wanted, p["vault_root"], state, p.get("dlp_mode") or default_dlp_mode(wanted))
+    return Profile(wanted, p["vault_root"], state, p.get("dlp_mode") or default_dlp_mode(wanted),
+                   _stored_advisor(p))
 
 
 def profile_for_vault(vault_root) -> Profile | None:
@@ -187,13 +242,60 @@ def read_vault_meta(vault_root) -> dict:
         raise ValueError(f".mem-vault.json okunamadi: {exc}") from exc
 
 
-def new_vault_meta(profile_name: str, dlp_mode: str) -> dict:
-    return {
+def new_vault_meta(profile_name: str, dlp_mode: str, advisor: str = "off") -> dict:
+    meta = {
         "schema": 1,
         "profile": profile_name,
         "dlp_mode": dlp_mode,
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
+    if advisor != "off":
+        meta["advisor"] = advisor
+    return meta
+
+
+def _advisor_context(vault_root) -> tuple[dict, Profile | None, str, str]:
+    try:
+        meta = read_vault_meta(vault_root)
+    except ValueError:
+        meta = {}
+    try:
+        prof = profile_for_vault(vault_root)
+    except ProfileError:
+        prof = None
+    name = (prof.name if prof else None) or meta.get("profile") or "default"
+    dlp_mode = (prof.dlp_mode if prof else None) or meta.get("dlp_mode") or default_dlp_mode(name)
+    # Savunma derinligi: profil kaydi ile kasa meta'sindan biri bile work/block diyorsa kapali kal.
+    if "work" in {(meta.get("profile") or "").strip().lower(), name.strip().lower()}:
+        name = "work"
+    if "block" in {meta.get("dlp_mode"), dlp_mode}:
+        dlp_mode = "block"
+    return meta, prof, name, dlp_mode
+
+
+def advisor_identity(vault_root) -> tuple[str, str]:
+    """(profil_adi, dlp_modu) - danisman kapisi icin en kisitlayici birlesim."""
+    _meta, _prof, name, dlp_mode = _advisor_context(vault_root)
+    return name, dlp_mode
+
+
+def effective_advisor_mode(vault_root, explicit: str | None = None) -> str:
+    """Etkin danisman modu: acik istek > MEM_ADVISOR > profil > kasa meta > "off".
+
+    Acik istek (CLI/arg) yasakli profilde ValueError verir; ortam/profil kaynakli istek
+    yasakli profilde sessizce "off" olur (work asla harici cagri yapmaz).
+    """
+    meta, prof, name, dlp_mode = _advisor_context(vault_root)
+    if explicit:
+        return validate_advisor_mode(explicit, name, dlp_mode)
+    wanted = (os.environ.get("MEM_ADVISOR") or "").strip().lower()
+    if wanted not in ADVISOR_MODES:
+        wanted = ""
+    if not wanted:
+        wanted = (prof.advisor if prof else None) or meta.get("advisor") or "off"
+    if wanted not in ADVISOR_MODES or not can_use_advisor(name, dlp_mode):
+        return "off"
+    return wanted
 
 
 def resolve_state_dir(vault_root, state_dir=None) -> Path:
