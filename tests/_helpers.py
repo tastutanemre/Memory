@@ -22,15 +22,23 @@ assert Path(mem.__file__).resolve().is_relative_to(SRC), "mem paketi src/ altind
 from mem import config, vault  # noqa: E402
 
 
+ISOLATED_ENV = (
+    "MEM_HOME", "MEM_PROFILE", "MEM_ADVISOR", "MEM_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+    "MEM_ADVISOR_DEBUG",
+)
+
+
 class IsolatedCase(unittest.TestCase):
     """Her test: gecici dizin + MEM_HOME izolasyonu (gercek ev dizinine asla dokunmaz)."""
 
     def setUp(self):
         self._tmp = tempfile.mkdtemp(prefix="memtest-")
         self.tmp = Path(self._tmp)
-        self._saved_env = {k: os.environ.get(k) for k in ("MEM_HOME", "MEM_PROFILE")}
+        self._saved_env = {k: os.environ.get(k) for k in ISOLATED_ENV}
         os.environ["MEM_HOME"] = str(self.tmp / "home")
-        os.environ.pop("MEM_PROFILE", None)
+        for k in ISOLATED_ENV:
+            if k != "MEM_HOME":
+                os.environ.pop(k, None)
 
     def tearDown(self):
         for k, v in self._saved_env.items():

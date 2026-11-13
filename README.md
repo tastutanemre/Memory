@@ -154,6 +154,36 @@ Aynı bilgisayarda birden fazla bağımsız kasa tutabilirsiniz (ör. `--profile
 
 ---
 
+## Opsiyonel: Gemini Decisions Danışmanı (yalnız `personal`)
+
+Varsayılan olarak `mem` **sıfır ağ** ile çalışır. İsterseniz, **yalnızca `work` olmayan ve `dlp_mode != block` olan** profillerde
+(ör. `personal`) Google'ın Gemini Decisions API'sini (`gemini-decision-1`, `generativelanguage.googleapis.com/v1beta/decisions`)
+kullanan iki opsiyonel yan yetenek açabilirsiniz. Ağ kodu yalnızca `src/mem_advisor/` paketindedir; `src/mem/` çekirdeği ağ modülü içermez.
+
+- **Anlamsal yeniden sıralama:** FTS5 adayları (ve hiç kelime örtüşmesi yokken en güncel 24 not) anlam açısından puanlanır;
+  ör. `önbellek ne zaman bayatlar` sorgusu `Redis TTL 300 saniye` notunu bulur. Anahtar yoksa veya hata olursa yerel sonuçlar aynen döner.
+- **Karar danışmanı (`decide`):** Yeni karar taslağı, aktif önceki kararlarla çelişiyor/mükerrer ya da henüz kesinleşmemişse
+  `advisor_warning` döner ve not yazılmaz (`supersedes` verin veya `force=true` ile zorlayın).
+
+```bash
+python mem.py init --profile personal --advisor gemini        # veya: python mem.py advisor enable --profile personal
+printf '%s' "$GEMINI_API_KEY" | python mem.py advisor set-key --stdin   # anahtar argv'ye yazılmaz
+python mem.py advisor status                                  # anahtarın kendisi asla gösterilmez
+python mem.py search --advisor gemini "önbellek ne zaman bayatlar"
+python mem.py connect antigravity --profile personal --advisor gemini    # MCP'ye --advisor gemini ekler
+```
+
+Güvenlik sınırları:
+
+- `work` profilinde veya `block` DLP kasalarında `--advisor gemini` açıkça **reddedilir**; `MEM_ADVISOR=gemini` ortam değişkeni de bu kasalarda yok sayılır.
+- Dışarı çıkan her metin önce `dlp.scan` ile taranır; bulgu içeren sorgu/not/karar **asla gönderilmez**. Yalnızca başlık, kısa pasaj ve karar alanları gider.
+- Yalnızca `https://generativelanguage.googleapis.com/v1beta/…` adresine izin verilir (yönlendirme izlenmez). Zaman aşımı/hata durumunda sessizce yerel davranışa dönülür.
+- API anahtarı sırayla `MEM_GEMINI_API_KEY` → `GEMINI_API_KEY` → `GOOGLE_API_KEY` → kasa **dışındaki** `MEM_HOME/advisor.json` kaynağından okunur; loglanmaz.
+- Yanıtlar `state_dir/advisor_cache.sqlite3` içinde (7 gün, en fazla 2000 kayıt; yalnızca özet anahtar + puan) önbelleğe alınır.
+- `MEM_ADVISOR_DEBUG=1` hata ayıklama için gizli veri içermeyen tek satır `stderr` çıktısı verir.
+
+---
+
 ## Kasa Yapısı ve Obsidian Görünümü
 
 ```text
