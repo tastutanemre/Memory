@@ -174,7 +174,7 @@ kullanan iki opsiyonel yan yetenek açabilirsiniz. Ağ kodu yalnızca `src/mem_a
 ```bash
 # Profilde etkinleştirme / devre dışı bırakma
 python mem.py advisor enable --profile personal
-python mem.py advisor disable --profile personal              # çalışan MCP sunucusunda da anında devre dışı kalır
+python mem.py advisor disable --profile personal              # profil ayarını izleyen çalışan MCP sunucusunda anında kapatır (--advisor veya MEM_ADVISOR üst-yazması varsa bunlar kaldırılıp sunucu yeniden başlatılmalıdır)
 
 # API anahtarı yönetimi (kabuk geçmişinde iz bırakmaz; kasa dışındaki advisor.json'a 0600 izinle yazılır)
 printf '%s' "$GEMINI_API_KEY" | python mem.py advisor set-key --stdin
