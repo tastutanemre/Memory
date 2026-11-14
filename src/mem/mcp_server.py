@@ -112,24 +112,63 @@ def _text(payload, is_error: bool = False) -> dict:
     return out
 
 
+_UNSET = object()
+
+
 class McpServer:
     def __init__(self, vault_root, state_dir=None, default_cwd: str | None = None,
                  vault_scope: bool = False, advisor_mode: str | None = None):
         self.vault_root = Path(vault_root)
         self.state_dir = state_dir
         self.vault_scope = vault_scope
-        # Opsiyonel harici danisman: yalniz acik istek/MEM_ADVISOR/profil ayari VE personal+non-block ise.
-        # work profilinde acik istek ValueError verir; ortam/profil kaynakli istek sessizce kapali kalir.
-        self.reranker = None
-        self.advisor = None
-        if config.effective_advisor_mode(self.vault_root, advisor_mode) == "gemini":
-            self.reranker, self.advisor = _build_gemini(self.vault_root, state_dir)
+        self._advisor_mode = advisor_mode
+        self._reranker_override: object = _UNSET
+        self._advisor_override: object = _UNSET
+        # Acilista dogrula: work/block profilde acik advisor="gemini" aninda ValueError verir.
+        # Sonraki her cagrida profil/anahtar durumu canli denetlenir; boylece `advisor disable`
+        # veya `set-key --clear` calisan MCP sunucusunda yeniden baslatma gerektirmeden aninda etkili olur.
+        config.effective_advisor_mode(self.vault_root, self._advisor_mode)
         self.default_cwd = str(self.vault_root) if vault_scope else (
             default_cwd if default_cwd is not None else os.getcwd()
         )
         # Son BASARILI memory_bootstrap(cwd=...) calisma alani; IDE sunucuyu kayitsiz bir dizinde
         # (ör. %USERPROFILE%) baslattiginda cwd'siz sonraki cagrilar icin guvenli yedek.
         self._bootstrapped_cwd: str | None = None
+
+    def _live_hooks(self):
+        try:
+            mode = config.effective_advisor_mode(self.vault_root, self._advisor_mode)
+        except ValueError:
+            return None, None
+        if mode != "gemini":
+            return None, None
+        return _build_gemini(self.vault_root, self.state_dir)
+
+    @property
+    def reranker(self):
+        if self._reranker_override is not _UNSET:
+            name, dlp_mode = config.advisor_identity(self.vault_root)
+            if not config.can_use_advisor(name, dlp_mode):
+                return None
+            return self._reranker_override
+        return self._live_hooks()[0]
+
+    @reranker.setter
+    def reranker(self, value) -> None:
+        self._reranker_override = value
+
+    @property
+    def advisor(self):
+        if self._advisor_override is not _UNSET:
+            name, dlp_mode = config.advisor_identity(self.vault_root)
+            if not config.can_use_advisor(name, dlp_mode):
+                return None
+            return self._advisor_override
+        return self._live_hooks()[1]
+
+    @advisor.setter
+    def advisor(self, value) -> None:
+        self._advisor_override = value
 
     # --- kapsam
     def _effective_cwd(self, args: dict) -> str:

@@ -168,8 +168,8 @@ kullanan iki opsiyonel yan yetenek açabilirsiniz. Ağ kodu yalnızca `src/mem_a
 ```bash
 python mem.py init --profile personal --advisor gemini        # veya: python mem.py advisor enable --profile personal
 printf '%s' "$GEMINI_API_KEY" | python mem.py advisor set-key --stdin   # anahtar argv'ye yazılmaz
-python mem.py advisor status                                  # anahtarın kendisi asla gösterilmez
-python mem.py search --advisor gemini "önbellek ne zaman bayatlar"
+python mem.py advisor status --profile personal               # anahtarın kendisi asla gösterilmez
+python mem.py search --profile personal --advisor gemini "önbellek ne zaman bayatlar"
 python mem.py connect antigravity --profile personal --advisor gemini    # MCP'ye --advisor gemini ekler
 ```
 

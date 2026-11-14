@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 
+from . import config
 from .lock import atomic_write_text
 
 BLOCK_START = "<!-- mem-bridge:start -->"
@@ -146,8 +147,8 @@ def _mcp_entry(profile_name: str, mem_py: Path, python: str, vault_scope: bool =
     args = [str(mem_py), "mcp", "--profile", profile_name]
     if vault_scope:
         args.append("--vault-scope")
-    if advisor == "gemini":
-        args += ["--advisor", "gemini"]
+    if advisor in config.ADVISOR_MODES:
+        args += ["--advisor", advisor]
     return {"command": python, "args": args}
 
 
@@ -155,6 +156,30 @@ def _toml_block(entry: dict) -> str:
     args = ", ".join(json.dumps(a, ensure_ascii=False) for a in entry["args"])
     return (f"{TOML_START}\n[mcp_servers.mem]\ncommand = {json.dumps(entry['command'], ensure_ascii=False)}\n"
             f"args = [{args}]\n{TOML_END}\n")
+
+
+def _validate_connect_advisor(profile_name: str, advisor: str | None) -> str | None:
+    if advisor is None or advisor == "":
+        return None
+    if not isinstance(advisor, str):
+        raise ValueError(f"Gecersiz advisor modu: {advisor!r}")
+    adv = advisor.strip().lower()
+    if adv not in config.ADVISOR_MODES:
+        raise ValueError(f"Gecersiz advisor modu: {advisor!r}")
+    if adv == "off":
+        return "off"
+    if (profile_name or "").strip().lower() == "work":
+        raise ValueError("`work` profili harici danisman (advisor) ile baglanamaz; hava bosluklu kalir.")
+    try:
+        prof = config.get_profile(profile_name) if profile_name else None
+    except config.ProfileError:
+        prof = None
+    if prof is not None:
+        vname, vdlp = config.advisor_identity(prof.vault_root)
+        name_eff = "work" if "work" in {prof.name.strip().lower(), vname.strip().lower()} else prof.name
+        dlp_eff = "block" if "block" in {prof.dlp_mode, vdlp} else prof.dlp_mode
+        return config.validate_advisor_mode(adv, name_eff, dlp_eff)
+    return config.validate_advisor_mode(adv, profile_name, config.default_dlp_mode(profile_name))
 
 
 # ---------------------------------------------------------------- ana islev
@@ -165,16 +190,13 @@ def connect_harness(harness: str, profile_name: str, config_root_override=None, 
                     advisor: str | None = None) -> dict:
     """MCP kaydi + global kural blogu yazar (veya uninstall ile yalniz kendi kayitlarini kaldirir).
 
-    `advisor="gemini"` yalniz acikca verilirse ve profil `work` degilse MCP argumanlarina eklenir.
+    Acik `advisor` ("gemini" veya "off") verilirse MCP argumanlarina yazilir; `None` ise profil varsayilani korunur.
     """
-    if advisor not in (None, "", "off", "gemini"):
-        raise ValueError(f"Gecersiz advisor modu: {advisor!r}")
-    if advisor == "gemini" and (profile_name or "").strip().lower() == "work":
-        raise ValueError("`work` profili harici danisman (advisor) ile baglanamaz; hava bosluklu kalir.")
+    adv = None if uninstall else _validate_connect_advisor(profile_name, advisor)
     t = _targets(harness, config_root_override)
     mem_py = Path(mem_py_path) if mem_py_path else default_mem_py()
     entry = _mcp_entry(profile_name, mem_py, python_exe or sys.executable,
-                       vault_scope=bool(t.get("vault_scope")), advisor=advisor)
+                       vault_scope=bool(t.get("vault_scope")), advisor=adv)
     files: list[dict] = []
 
     # --- MCP kaydi

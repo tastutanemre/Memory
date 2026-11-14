@@ -23,7 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from mem import config, dlp
-from mem.lock import atomic_write_text, read_text_retry
+from mem.lock import read_text_retry
 
 DECISIONS_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/decisions"
 DEFAULT_MODEL = "gemini-decision-1"
@@ -106,9 +106,45 @@ def load_advisor_settings() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _atomic_write_secret(path: Path, text: str) -> None:
+    """Gizli ayarlari bastan 0600 izinli gecici dosyaya yazip atomik olarak hedefle degistirir."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = text.encode("utf-8")
+    tmp = path.parent / f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(tmp), flags, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        view = memoryview(data)
+        written = 0
+        while written < len(view):
+            written += os.write(fd, view[written:])
+        os.fsync(fd)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    os.close(fd)
+    try:
+        os.replace(str(tmp), str(path))
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def save_advisor_settings(*, gemini_api_key: str | None = None, clear_key: bool = False,
                           model: str | None = None) -> Path:
-    """Ayarlari birlestirerek yazar. Anahtar yalniz bu dosyaya yazilir (POSIX'te 0600)."""
+    """Ayarlari birlestirerek yazar. Gecici dosya olusturma aninda 0600 ile korunur."""
     data = load_advisor_settings()
     if clear_key:
         data.pop("gemini_api_key", None)
@@ -120,11 +156,7 @@ def save_advisor_settings(*, gemini_api_key: str | None = None, clear_key: bool 
     if model is not None:
         data["model"] = model.strip() or DEFAULT_MODEL
     path = config.advisor_config_path()
-    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    _atomic_write_secret(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     return path
 
 

@@ -509,22 +509,29 @@ class DecisionAdvisorTests(AdvisorBase):
         self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz123456", json.dumps(seen))
 
     def test_work_and_block_never_call_advisor(self):
-        class Fail:
+        calls: list[str] = []
+
+        class SpyExternal:
             is_external = True
 
             def assess_decision(self, proposal, priors):
-                raise AssertionError("work/block'ta cagrilmamali")
+                calls.append("assess")
+                return {"warnings": ["should_never_run"], "existing": None, "message": "x"}
 
             def rerank(self, query, results):
-                raise AssertionError("work/block'ta cagrilmamali")
+                calls.append("rerank")
+                return []
 
         for profile, mode in (("work", None), ("personal", "block")):
             root, state = self.make_vault(profile, f"v-{profile}-{mode}", dlp_mode=mode)
-            res = vault.record_decision(root, None, "Karar", "Bir karar", state_dir=state, advisor=Fail())
+            res = vault.record_decision(root, None, "Karar", "Bir karar", state_dir=state, advisor=SpyExternal())
             self.assertEqual(res["status"], "created")
+            self.assertEqual(calls, [])
             self.write_md(root, "knowledge/x.md", "# X\n\nredis ayar\n")
-            self.assertTrue(vault.search_memory(root, "redis", state_dir=state, reranker=Fail()))
-            vault.bootstrap_context(root, state, task_hint="redis", reranker=Fail())
+            self.assertTrue(vault.search_memory(root, "redis", state_dir=state, reranker=SpyExternal()))
+            self.assertEqual(calls, [])
+            vault.bootstrap_context(root, state, task_hint="redis", reranker=SpyExternal())
+            self.assertEqual(calls, [])
 
 
 class CliMcpHarnessTests(AdvisorBase):
@@ -634,20 +641,63 @@ class CliMcpHarnessTests(AdvisorBase):
         with self.assertRaises(ValueError):
             mcp_server.McpServer(wroot, wstate, advisor_mode="gemini")
 
+    def test_mcp_live_revocation_on_disable_and_clear_key(self):
+        root, state = self.personal()
+        config.set_profile_advisor("personal", "gemini")
+        gd.save_advisor_settings(gemini_api_key=FAKE_KEY)
+        srv = mcp_server.McpServer(root, state)
+        self.assertIsNotNone(srv.reranker)
+        self.assertIsNotNone(srv.advisor)
+        # Calisan MCP sunucusunda profil kapatilinca sonraki cagrilar aninda devre disi kalir
+        config.set_profile_advisor("personal", "off")
+        self.assertIsNone(srv.reranker)
+        self.assertIsNone(srv.advisor)
+        # Tekrar acilip anahtar silindiginde de aninda devre disi kalir
+        config.set_profile_advisor("personal", "gemini")
+        self.assertIsNotNone(srv.advisor)
+        gd.save_advisor_settings(clear_key=True)
+        self.assertIsNone(srv.reranker)
+        self.assertIsNone(srv.advisor)
+
+    def test_secret_writer_creates_0600_temp_before_write(self):
+        seen_modes: list[int] = []
+        real_open = os.open
+
+        def spy_open(path, flags, mode=0o777, *args, **kwargs):
+            if str(path).endswith(".tmp"):
+                seen_modes.append(mode)
+            return real_open(path, flags, mode, *args, **kwargs)
+
+        with mock.patch.object(os, "open", side_effect=spy_open):
+            p = gd.save_advisor_settings(gemini_api_key="secret-key-0123456789")
+        self.assertEqual(seen_modes, [0o600])
+        self.assertEqual(gd.load_advisor_settings()["gemini_api_key"], "secret-key-0123456789")
+        self.assertEqual(list(p.parent.glob("*.tmp")), [])
+
     def test_harness_advisor_arg(self):
         default = harness._mcp_entry("personal", Path("mem.py"), "python")
         self.assertNotIn("--advisor", default["args"])
         with_adv = harness._mcp_entry("personal", Path("mem.py"), "python", advisor="gemini")
         self.assertEqual(with_adv["args"][-2:], ["--advisor", "gemini"])
+        with_off = harness._mcp_entry("personal", Path("mem.py"), "python", advisor="off")
+        self.assertEqual(with_off["args"][-2:], ["--advisor", "off"])
         cfg = self.tmp / "cfg"
         res = harness.connect_harness("devin", "personal", config_root_override=cfg, advisor="gemini")
         self.assertEqual(res["mcp_entry"]["args"][-2:], ["--advisor", "gemini"])
+        res_off = harness.connect_harness("devin", "personal", config_root_override=cfg, advisor="off")
+        self.assertEqual(res_off["mcp_entry"]["args"][-2:], ["--advisor", "off"])
         res = harness.connect_harness("devin", "personal", config_root_override=cfg)
         self.assertNotIn("--advisor", res["mcp_entry"]["args"])
         with self.assertRaises(ValueError):
             harness.connect_harness("devin", "work", config_root_override=cfg, advisor="gemini")
         with self.assertRaises(ValueError):
             harness.connect_harness("devin", "WORK", config_root_override=cfg, advisor="gemini")
+        # dlp_mode="block" ile kayitli personal profilde connect --advisor gemini dosya yazmadan reddedilmeli
+        self.make_vault("personal", "pblock", dlp_mode="block")
+        cfg_block = self.tmp / "cfg-block"
+        with self.assertRaises(ValueError):
+            harness.connect_harness("devin", "personal", config_root_override=cfg_block, advisor="gemini")
+        self.assertFalse(cfg_block.exists())
 
 
 if __name__ == "__main__":

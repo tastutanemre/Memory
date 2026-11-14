@@ -189,15 +189,31 @@ def set_profile_advisor(name: str, advisor: str) -> Profile:
     entry = data["profiles"].get(name)
     if entry is None:
         raise ProfileError(f"Profil bulunamadi: {name!r}. Kayitli profiller: {sorted(data['profiles'])}")
+    vroot = entry["vault_root"]
     mode = entry.get("dlp_mode") or default_dlp_mode(name)
-    adv = validate_advisor_mode(advisor, name, mode)
+    meta_path = vault_meta_path(vroot)
+    meta: dict | None = None
+    if meta_path.exists():
+        try:
+            meta = read_vault_meta(vroot)
+        except ValueError:
+            meta = None
+    name_check = "work" if meta and (meta.get("profile") or "").strip().lower() == "work" else name
+    mode_check = "block" if meta and meta.get("dlp_mode") == "block" else mode
+    adv = validate_advisor_mode(advisor, name_check, mode_check)
     if adv == "off":
         entry.pop("advisor", None)
     else:
         entry["advisor"] = adv
     _save_registry(data)
+    if isinstance(meta, dict):
+        if adv == "off":
+            meta.pop("advisor", None)
+        else:
+            meta["advisor"] = adv
+        atomic_write_text(meta_path, json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
     state = entry.get("state_dir") or str(default_state_dir(name))
-    return Profile(name, entry["vault_root"], state, mode, adv)
+    return Profile(name, vroot, state, mode, adv)
 
 
 def get_profile(name: str | None = None) -> Profile:
