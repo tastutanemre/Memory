@@ -1,6 +1,6 @@
 # mem — Yerel İkinci Beyin (MCP) Motoru
 
-Yapay zekâ kodlama ajanları ve masaüstü asistanları için **sıfır bağımlılıklı**, **tamamen çevrimdışı (yerel)** ve **Obsidian uyumlu** mühendislik hafızası motoru.
+Yapay zekâ kodlama ajanları ve masaüstü asistanları için **sıfır bağımlılıklı**, **yerel öncelikli** ve **Obsidian uyumlu** mühendislik hafızası motoru.
 
 Projelerinizde alınan mimari kararları (ADR), kalıcı kuralları, açık konuları ve oturum devir özetlerini düz Markdown dosyaları olarak saklar; **Model Context Protocol (MCP)** üzerinden kullandığınız tüm yapay zekâ araçlarının aynı hafızayı paylaşmasını sağlar.
 
@@ -9,7 +9,7 @@ Projelerinizde alınan mimari kararları (ADR), kalıcı kuralları, açık konu
 ## Öne Çıkan Özellikler
 
 - **Sıfır Harici Bağımlılık (`pip install` gerekmez):** Yalnızca Python 3.11+ standart kütüphanesi (`sqlite3`, `json`, `pathlib`) ile çalışır. Doğrudan `python mem.py` olarak çalıştırılabilir.
-- **%100 Yerel ve Sıfır Ağ Erişimi:** Hiçbir ağ modülü (`http`, `urllib`, `socket`, `ssl`) içermez; dış API, telemetri veya bulut servisi kullanmaz (birim testleriyle kilitlidir).
+- **Sıfır-Ağ Çekirdek ve İzole Mimari:** Çekirdek motor (`src/mem/`) hiçbir ağ modülü (`http`, `urllib`, `socket`, `ssl`) içermez ve varsayılan olarak %100 çevrimdışı çalışır (AST birim testleriyle kilitlidir). İsteğe bağlı kişisel anlamsal danışman ise tamamen ayrı bir yan pakette (`src/mem_advisor/`) izole tutulur ve kurumsal `work` profillerinde kesin olarak kapalıdır.
 - **Çoklu Ajan ve Masaüstü Desteği:** Tek komutla **Claude Code**, **Claude Desktop**, **ChatGPT / Codex**, **Google Antigravity** ve **Devin Desktop** ile bağlanır.
 - **Obsidian Doğal Uyumu:** Notlar standart YAML frontmatter ve `[[WikiLink]]` bağlantılarıyla yazılır. Kasa doğrudan Obsidian'da açıldığında projeler kendi isimleriyle merkez düğüm olur, kararlar ve kurallar renk gruplarıyla otomatik görselleşir.
 - **Türkçe Kök/Ek Duyarlı Hızlı Arama:** SQLite WAL + FTS5 BM25 tam metin araması; Türkçe çekim eklerini köklerken (`bağlantılarından` → `bağlant`) teknik terimleri (`PostgreSQL`, `OAuth2`, `mcp_config`) bozmaz. `[[WikiLink]]` komşuluk grafı ve karar/kural önceliğiyle sıralar.
@@ -46,7 +46,10 @@ python mem.py init --profile personal --vault C:\Notlar\Hafiza
 python3 mem.py init --profile personal --vault ~/Notes/MemoryVault
 ```
 
-> Not: `--vault` vermezseniz kasa otomatik olarak kullanıcı veri dizininiz altında oluşturulur. İndeks veritabanı (`index.sqlite3`) ve kilit dosyaları her zaman kasa klasörünün **dışında** tutulur; böylece Obsidian veya bulut senkronizasyonuyla çakışmaz.
+> **Notlar:**
+> - `--profile` vermezseniz güvenlik gereği varsayılan profil `work` (`dlp: block`, hava boşluklu mod) olarak oluşturulur; kişisel kullanım için `--profile personal` (`dlp: redact`) önerilir.
+> - `--vault` vermezseniz kasa ev dizininizde `~/MemVault/<profil>` altında (`MEM_HOME` tanımlıysa `$MEM_HOME/vaults/<profil>` altında) oluşturulur.
+> - İndeks veritabanı (`index.sqlite3`), kilit dosyaları ve `profiles.json` her zaman kasa klasörünün **dışında** (`%LOCALAPPDATA%\mem-engine` veya `~/.local/share/mem-engine`) tutulur; böylece Obsidian veya bulut senkronizasyonuyla çakışmaz.
 
 ### 3. Projelerinizi Kaydedin
 
@@ -54,6 +57,7 @@ Hafızanın devreye girmesini istediğiniz yazılım projelerini beyaz listeye e
 
 ```bash
 python mem.py project add backend-api --root /yol/backend-api --name "Backend API"
+python mem.py project list
 ```
 
 ### 4. Kullandığınız Yapay Zekâ Araçlarına Bağlayın
@@ -112,12 +116,12 @@ Bağlantı kurulduğunda yapay zekâ ajanınız şu MCP araçlarını doğrudan 
 
 | MCP Aracı | Görevi |
 |---|---|
-| `memory_bootstrap` | Oturum başında çağrılır; `Core.md`, genel/proje kuralları, açık konular ve son oturum devir kartını getirir. |
+| `memory_bootstrap` | Oturum başında çağrılır; `Core.md`, genel/proje kuralları, açık konular ve son oturum devir kartını getirir (`budget_chars` varsayılan `8000`). |
 | `memory_search` | Türkçe kök/ek duyarlı FTS5 BM25 + `[[WikiLink]]` komşuluk grafı ile hafızada arama yapar. |
 | `memory_read` | Belirtilen notu ve iyimser kilitleme için güncel `sha256` özetini okur. |
-| `memory_decide` | Mimari/ürün kararlarını standart ADR formatında kaydeder; mükerrer kararları uyarır, `supersedes` ile eski kararları geçersiz kılar. |
-| `memory_rule` | Kullanıcı düzeltmelerinden çıkan kalıcı kuralları (`global` veya proje kapsamlı) ekler. |
-| `memory_patch` | Mevcut bir notu `expected_sha256` doğrulamasıyla güvenli biçimde günceller. |
+| `memory_decide` | Mimari/ürün kararlarını standart ADR formatında kaydeder (`shared=true` ile ortak bilgiye yazar); mükerrer/çelişkili kararlarda `duplicate_warning` veya `advisor_warning` döndürür, `supersedes` ile eski kararları geçersiz kılar. |
+| `memory_rule` | Kullanıcı düzeltmelerinden çıkan kalıcı kuralları (`scope='global'` veya proje kapsamlı) ekler. |
+| `memory_patch` | Mevcut bir notu `expected_sha256` doğrulaması ve `edits` listesiyle güvenli biçimde günceller. |
 | `memory_finish` | Oturum sonunda iş makbuzu oluşturur, `Son-Oturum.md` devir kartını ve `Acik-Konular.md` listesini günceller. |
 
 **Hazır MCP Prompt'ları:** `start` (oturumu bağlamla başlat), `decide` (kararı ADR olarak kaydet), `wrapup` (oturum devir özeti yaz).
@@ -129,11 +133,13 @@ Bağlantı kurulduğunda yapay zekâ ajanınız şu MCP araçlarını doğrudan 
 MCP dışında doğrudan terminalden de tüm işlemler yapılabilir (`--json` bayrağı makine okunur çıktı üretir):
 
 ```bash
-python mem.py bootstrap --task "kimlik doğrulama"
+python mem.py bootstrap --task "kimlik doğrulama" --budget 8000
 python mem.py decide --title "Önbellek katmanı" --decision "Okuma yoğun uçlarda Redis kullanılacak" --rationale "Düşük gecikme"
-python mem.py rule "Her veritabanı şema değişikliği geri alınabilir migrasyon içermeli" --reason "Canlı güvenlik"
-python mem.py search "önbellek kararları"
+python mem.py decide --shared --title "API sürümleme" --decision "Tüm servisler /v1/ öneki kullanır"
+python mem.py rule "Her veritabanı şema değişikliği geri alınabilir migrasyon içermeli" --reason "Canlı güvenlik" --scope global
+python mem.py search "önbellek kararları" --limit 10 --include-superseded
 python mem.py read projects/backend-api/Backend-API.md
+python mem.py patch projects/backend-api/Acik-Konular.md --sha256 <mevcut_sha256> --old "- [ ] Eski madde" --new "- [x] Tamamlandı"
 python mem.py finish --summary "OAuth2 akışı tamamlandı" --thread "Yenileme token rotasyonu eklenecek"
 python mem.py sync
 python mem.py profiles
@@ -148,13 +154,13 @@ python mem.py doctor
 
 Aynı bilgisayarda birden fazla bağımsız kasa tutabilirsiniz (ör. `--profile personal` ve `--profile work`).
 
-- **`redact` modu (`personal` ve genel profillerde varsayılan):** API anahtarı, özel anahtar (`PEM`/`PGP`), JWT, veritabanı bağlantı dizgesi (`URI` / `ADO.NET`), `.env` parola atamaları, IBAN ve TCKN yakalandığında otomatik olarak `[REDACTED:<kategori>]` ile maskelenir.
+- **`redact` modu (`personal` ve özel profillerde varsayılan):** API anahtarı, özel anahtar (`PEM`/`PGP`), JWT, veritabanı bağlantı dizgesi (`URI` / `ADO.NET`), `.env` parola atamaları, IBAN ve TCKN yakalandığında otomatik olarak `[REDACTED:<kategori>]` ile maskelenir.
 - **`block` modu (`work` profilinde varsayılan veya `--dlp block` ile):** Hassas veri tespit edildiğinde yazma işlemi tamamen reddedilir; hata mesajında gizli değerin kendisi asla açık yazılmaz.
 - **Özel Kurallar (`dlp-patterns.txt`):** Kasa kökündeki `dlp-patterns.txt` dosyasına kendi alan adlarınızı, iç IP bloklarınızı veya `regex:` önekli desenlerinizi ekleyebilirsiniz.
 
 ---
 
-## Opsiyonel: Gemini Decisions Danışmanı (yalnız `personal`)
+## Opsiyonel: Gemini Decisions Danışmanı (`personal` / `redact` Profiller)
 
 Varsayılan olarak `mem` **sıfır ağ** ile çalışır. İsterseniz, **yalnızca `work` olmayan ve `dlp_mode != block` olan** profillerde
 (ör. `personal`) Google'ın Gemini Decisions API'sini (`gemini-decision-1`, `generativelanguage.googleapis.com/v1beta/decisions`)
@@ -166,21 +172,39 @@ kullanan iki opsiyonel yan yetenek açabilirsiniz. Ağ kodu yalnızca `src/mem_a
   `advisor_warning` döner ve not yazılmaz (`supersedes` verin veya `force=true` ile zorlayın).
 
 ```bash
-python mem.py init --profile personal --advisor gemini        # veya: python mem.py advisor enable --profile personal
-printf '%s' "$GEMINI_API_KEY" | python mem.py advisor set-key --stdin   # anahtar argv'ye yazılmaz
+# Profilde etkinleştirme / devre dışı bırakma
+python mem.py advisor enable --profile personal
+python mem.py advisor disable --profile personal              # çalışan MCP sunucusunda da anında devre dışı kalır
+
+# API anahtarı yönetimi (kabuk geçmişinde iz bırakmaz; kasa dışındaki advisor.json'a 0600 izinle yazılır)
+printf '%s' "$GEMINI_API_KEY" | python mem.py advisor set-key --stdin
+python mem.py advisor set-key --from-env GEMINI_API_KEY
+python mem.py advisor set-key --clear
+
+# Durum kontrolü ve kullanım
 python mem.py advisor status --profile personal               # anahtarın kendisi asla gösterilmez
 python mem.py search --profile personal --advisor gemini "önbellek ne zaman bayatlar"
-python mem.py connect antigravity --profile personal --advisor gemini    # MCP'ye --advisor gemini ekler
+python mem.py connect antigravity --profile personal --advisor gemini
 ```
 
 Güvenlik sınırları:
 
 - `work` profilinde veya `block` DLP kasalarında `--advisor gemini` açıkça **reddedilir**; `MEM_ADVISOR=gemini` ortam değişkeni de bu kasalarda yok sayılır.
 - Dışarı çıkan her metin önce `dlp.scan` ile taranır; bulgu içeren sorgu/not/karar **asla gönderilmez**. Yalnızca başlık, kısa pasaj ve karar alanları gider.
-- Yalnızca `https://generativelanguage.googleapis.com/v1beta/…` adresine izin verilir (yönlendirme izlenmez). Zaman aşımı/hata durumunda sessizce yerel davranışa dönülür.
-- API anahtarı sırayla `MEM_GEMINI_API_KEY` → `GEMINI_API_KEY` → `GOOGLE_API_KEY` → kasa **dışındaki** `MEM_HOME/advisor.json` kaynağından okunur; loglanmaz.
+- Yalnızca `https://generativelanguage.googleapis.com/v1beta/…` adresine izin verilir (HTTP yönlendirmeleri izlenmez). Zaman aşımı/hata durumunda sessizce yerel davranışa dönülür.
 - Yanıtlar `state_dir/advisor_cache.sqlite3` içinde (7 gün, en fazla 2000 kayıt; yalnızca özet anahtar + puan) önbelleğe alınır.
-- `MEM_ADVISOR_DEBUG=1` hata ayıklama için gizli veri içermeyen tek satır `stderr` çıktısı verir.
+
+---
+
+## Ortam Değişkenleri ve Veri Dizinleri
+
+| Değişken / Dizin | Varsayılan | Açıklama |
+|---|---|---|
+| `MEM_HOME` | Windows: `%LOCALAPPDATA%\mem-engine`<br>macOS/Linux: `~/.local/share/mem-engine` | `profiles.json`, `advisor.json`, SQLite indeks (`state/<profil>/`) ve kilit dosyalarının tutulduğu kasa dışı dizin. |
+| `MEM_PROFILE` | Kayıtlı varsayılan profil | `--profile` bayrağı verilmediğinde kullanılacak profil adı. |
+| `MEM_ADVISOR` | *(tanımsız)* | `gemini` veya `off` (`work` ve `block` profillerde güvenlik gereği yok sayılır). |
+| `MEM_GEMINI_API_KEY` | *(tanımsız)* | Opsiyonel danışman için en yüksek öncelikli API anahtarı (`GEMINI_API_KEY` → `GOOGLE_API_KEY` → `MEM_HOME/advisor.json` sırasıyla aranır). |
+| `MEM_ADVISOR_DEBUG` | `0` | `1` yapıldığında danışman ağ/zaman aşımı hatalarında gizli veri içermeyen tek satır `stderr` tanı bilgisi yazar. |
 
 ---
 

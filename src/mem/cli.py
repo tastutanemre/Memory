@@ -401,7 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("bootstrap", parents=[common, scoped, advisor_opt], help="oturum bağlamı")
     s.add_argument("--task", help="görev ipucu")
-    s.add_argument("--budget", type=int, default=6000)
+    s.add_argument("--budget", type=int, default=8000)
     s.set_defaults(func=cmd_bootstrap)
 
     s = sub.add_parser("finish", parents=[common, scoped], help="oturumu bitir (makbuz + devir kartı)")
@@ -432,7 +432,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--config-root", help="gerçek ev dizini yerine bu kökü kullan (test/izolasyon)")
     s.set_defaults(func=cmd_connect)
 
-    s = sub.add_parser("import-v3", parents=[common], help="eski beyin_v3 kasasını içe aktar (salt-okunur)")
+    s = sub.add_parser("import-v3", parents=[common], help="eski Markdown kasasını içe aktar (salt-okunur)")
     s.add_argument("source")
     s.add_argument("--dry-run", action="store_true")
     s.set_defaults(func=cmd_import_v3)
@@ -440,7 +440,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("profiles", parents=[common], help="kayıtlı profiller")
     s.set_defaults(func=cmd_profiles)
 
-    s = sub.add_parser("advisor", help="opsiyonel Gemini Decisions danışmanı (yalnız personal)")
+    s = sub.add_parser("advisor", help="opsiyonel Gemini Decisions danışmanı (work ve block olmayan profiller)")
     asub = s.add_subparsers(dest="advisor_cmd", required=True)
     for nm, hlp in (("status", "durum"), ("enable", "profilde aç"), ("disable", "profilde kapat")):
         a = asub.add_parser(nm, parents=[common], help=hlp)

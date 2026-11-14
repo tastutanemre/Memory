@@ -19,7 +19,7 @@ RECOVERY_SCORE = 0.05
 
 @runtime_checkable
 class SemanticReranker(Protocol):
-    """Yerel (Ollama/ONNX vb.) anlamsal yeniden siralama icin kanca; varsayilan NoOp."""
+    """Anlamsal yeniden sıralama kancası (isteğe bağlı yan adaptör veya özel yerel yeniden sıralayıcı); varsayılan NoOp."""
 
     def rerank(self, query: str, results: list[dict]) -> list[dict]: ...
 

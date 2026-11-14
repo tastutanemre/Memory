@@ -23,7 +23,7 @@ RULE_BLOCK = f"""{BLOCK_START}
 
 - Oturum başında `memory_bootstrap` çağır (cwd olarak aktif çalışma alanı yolunu ver) ve dönen kuralları uygula.
 - Her `memory_*` çağrısında aktif çalışma alanı yolunu `cwd` parametresiyle gönder (sunucu IDE'nin başlattığı dizinde çalışır, repo dizininde değil).
-- Mimari/ürün kararı verildiğinde `memory_decide` ile kaydet; eski bir kararın yerine geçiyorsa `supersedes` ver.
+- Mimari/ürün kararı verildiğinde `memory_decide` ile kaydet; eski bir kararın yerine geçiyorsa `supersedes` ver (`duplicate_warning` veya `advisor_warning` dönerse kullanıcı onayı olmadan `force=true` kullanma).
 - Kullanıcı seni düzelttiğinde kalıcı kuralı `memory_rule` ile kaydet.
 - Anlamlı bir iş bitince `memory_finish` ile özet, açık konular ve kaynakları yaz.
 - `memory_bootstrap` `status: unregistered_workspace` dönerse bu repo hafıza beyaz listesinde değildir:
