@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 
+from . import config
 from .lock import atomic_write_text
 
 BLOCK_START = "<!-- mem-bridge:start -->"
@@ -22,7 +23,7 @@ RULE_BLOCK = f"""{BLOCK_START}
 
 - Oturum başında `memory_bootstrap` çağır (cwd olarak aktif çalışma alanı yolunu ver) ve dönen kuralları uygula.
 - Her `memory_*` çağrısında aktif çalışma alanı yolunu `cwd` parametresiyle gönder (sunucu IDE'nin başlattığı dizinde çalışır, repo dizininde değil).
-- Mimari/ürün kararı verildiğinde `memory_decide` ile kaydet; eski bir kararın yerine geçiyorsa `supersedes` ver.
+- Mimari/ürün kararı verildiğinde `memory_decide` ile kaydet; eski bir kararın yerine geçiyorsa `supersedes` ver (`duplicate_warning` veya `advisor_warning` dönerse kullanıcı onayı olmadan `force=true` kullanma).
 - Kullanıcı seni düzelttiğinde kalıcı kuralı `memory_rule` ile kaydet.
 - Anlamlı bir iş bitince `memory_finish` ile özet, açık konular ve kaynakları yaz.
 - `memory_bootstrap` `status: unregistered_workspace` dönerse bu repo hafıza beyaz listesinde değildir:
@@ -141,10 +142,13 @@ def _json_load(path: Path, text: str | None) -> dict:
     return data
 
 
-def _mcp_entry(profile_name: str, mem_py: Path, python: str, vault_scope: bool = False) -> dict:
+def _mcp_entry(profile_name: str, mem_py: Path, python: str, vault_scope: bool = False,
+               advisor: str | None = None) -> dict:
     args = [str(mem_py), "mcp", "--profile", profile_name]
     if vault_scope:
         args.append("--vault-scope")
+    if advisor in config.ADVISOR_MODES:
+        args += ["--advisor", advisor]
     return {"command": python, "args": args}
 
 
@@ -154,16 +158,45 @@ def _toml_block(entry: dict) -> str:
             f"args = [{args}]\n{TOML_END}\n")
 
 
+def _validate_connect_advisor(profile_name: str, advisor: str | None) -> str | None:
+    if advisor is None or advisor == "":
+        return None
+    if not isinstance(advisor, str):
+        raise ValueError(f"Gecersiz advisor modu: {advisor!r}")
+    adv = advisor.strip().lower()
+    if adv not in config.ADVISOR_MODES:
+        raise ValueError(f"Gecersiz advisor modu: {advisor!r}")
+    if adv == "off":
+        return "off"
+    if (profile_name or "").strip().lower() == "work":
+        raise ValueError("`work` profili harici danisman (advisor) ile baglanamaz; hava bosluklu kalir.")
+    try:
+        prof = config.get_profile(profile_name) if profile_name else None
+    except config.ProfileError:
+        prof = None
+    if prof is not None:
+        vname, vdlp = config.advisor_identity(prof.vault_root)
+        name_eff = "work" if "work" in {prof.name.strip().lower(), vname.strip().lower()} else prof.name
+        dlp_eff = "block" if "block" in {prof.dlp_mode, vdlp} else prof.dlp_mode
+        return config.validate_advisor_mode(adv, name_eff, dlp_eff)
+    return config.validate_advisor_mode(adv, profile_name, config.default_dlp_mode(profile_name))
+
+
 # ---------------------------------------------------------------- ana islev
 
 
 def connect_harness(harness: str, profile_name: str, config_root_override=None, dry_run: bool = False,
-                    uninstall: bool = False, mem_py_path=None, python_exe: str | None = None) -> dict:
-    """MCP kaydi + global kural blogu yazar (veya uninstall ile yalniz kendi kayitlarini kaldirir)."""
+                    uninstall: bool = False, mem_py_path=None, python_exe: str | None = None,
+                    advisor: str | None = None) -> dict:
+    """MCP kaydi + global kural blogu yazar (veya uninstall ile yalniz kendi kayitlarini kaldirir).
+
+    Acik `advisor` ("gemini" veya "off") verilirse MCP argumanlarina yazilir; `None` ise profil varsayilani korunur.
+    """
+    adv = None if uninstall else _validate_connect_advisor(profile_name, advisor)
     t = _targets(harness, config_root_override)
     mem_py = Path(mem_py_path) if mem_py_path else default_mem_py()
     entry = _mcp_entry(profile_name, mem_py, python_exe or sys.executable,
-                       vault_scope=bool(t.get("vault_scope")))
+                       vault_scope=bool(t.get("vault_scope")), advisor=adv)
     files: list[dict] = []
 
     # --- MCP kaydi

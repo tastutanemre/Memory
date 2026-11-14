@@ -5,10 +5,29 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mem-engine"
 version = "0.1.0"
-description = "Sifir bagimlilikli, kurumsal DLP dostu Ikinci Beyin (muhendislik hafizasi) motoru"
+description = "Sıfır bağımlılıklı, kurumsal DLP dostu yerel İkinci Beyin (MCP mühendislik hafızası) motoru"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
+authors = [{ name = "tastutanemre" }]
+keywords = ["mcp", "memory", "second-brain", "adr", "obsidian", "sqlite", "fts5", "dlp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Documentation",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/tastutanemre/Memory"
+Repository = "https://github.com/tastutanemre/Memory"
+Issues = "https://github.com/tastutanemre/Memory/issues"
 
 [project.scripts]
 mem = "mem.cli:main"

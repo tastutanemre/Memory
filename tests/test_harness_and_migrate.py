@@ -127,7 +127,7 @@ class HarnessTests(IsolatedCase):
 
 class MigrateTests(IsolatedCase):
     def make_v3(self) -> Path:
-        v3 = self.tmp / "ikinciBeyin"
+        v3 = self.tmp / "legacy-vault"
         self.write_md(v3, "notes/projects/OrderService/kararlar/2026-01-01-redis.md",
                       '---\n{"kind": "fact", "project": "OrderService", "title": "Redis kararı", '
                       '"tags": ["db"]}\n---\n# Redis kararı\n\n**Karar:** Redis kullan\n')
@@ -202,29 +202,29 @@ class MigrateTests(IsolatedCase):
 
     def test_companion_receipts_generated_and_wikilinks(self):
         v3 = self.tmp / "v3full"
-        self.write_md(v3, "🔮 850-Companion/Core.md", "# Düşünme ortağı\n\n- Kısa ve net cevap\n")
-        self.write_md(v3, "🔮 850-Companion/Last-Session.md", "# Son oturum\n\nDevir özeti\n")
-        self.write_md(v3, "🔮 850-Companion/Threads.md", "# Threads\n\nAçık konu 1\n")
+        self.write_md(v3, "00-Companion/Core.md", "# Düşünme ortağı\n\n- Kısa ve net cevap\n")
+        self.write_md(v3, "00-Companion/Last-Session.md", "# Son oturum\n\nDevir özeti\n")
+        self.write_md(v3, "00-Companion/Threads.md", "# Threads\n\nAçık konu 1\n")
         self.write_md(v3, "knowledge/v3/outcomes.md",
                       '---\n{"generated": true, "kind": "receipt-index"}\n---\n# Index\n')
-        self.write_md(v3, "notes/projects/AuthHub/Genel-Bakis.md",
-                      "# AuthHub\n\n<!-- beyin-baglantilar -->\nEski bağlantı\n<!-- beyin-baglantilar -->\n")
-        self.write_md(v3, "notes/projects/AuthHub/kararlar/2026-09-07-ilk.md",
+        self.write_md(v3, "notes/projects/AuthService/Genel-Bakis.md",
+                      "# AuthService\n\n<!-- beyin-baglantilar -->\nEski bağlantı\n<!-- beyin-baglantilar -->\n")
+        self.write_md(v3, "notes/projects/AuthService/kararlar/2026-09-07-ilk.md",
                       '---\n{"kind": "fact", "decision_date": "2026-09-07", "title": "İlk karar"}\n---\n'
                       "# İlk karar\n\n<!-- beyin-baglantilar -->\n"
-                      "Proje: [[notes/projects/AuthHub/Genel-Bakis|AuthHub genel bakış]]\n"
+                      "Proje: [[notes/projects/AuthService/Genel-Bakis|AuthService genel bakış]]\n"
                       "<!-- beyin-baglantilar -->\n")
-        self.write_md(v3, "notes/projects/AuthHub/kararlar/2026-09-10-yeni.md",
+        self.write_md(v3, "notes/projects/AuthService/kararlar/2026-09-10-yeni.md",
                       '---\n{"kind": "fact", "title": "Yeni karar", '
-                      '"supersedes": ["notes/projects/AuthHub/kararlar/2026-09-07-ilk.md"]}\n---\n'
+                      '"supersedes": ["notes/projects/AuthService/kararlar/2026-09-07-ilk.md"]}\n---\n'
                       "# Yeni karar\n")
-        self.write_md(v3, "receipts/ffe2d0dc0950ec79d6cdc488cf8b62fd04bfe1cfe22a7757234eab083dcfe2cd.md",
+        self.write_md(v3, "receipts/a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90.md",
                       '---\n{"kind": "receipt", "created_at": "2026-11-08T09:22:10+00:00", '
-                      '"refs": ["notes/projects/AuthHub/Genel-Bakis.md"]}\n---\nWebhook testi geçti.\n')
+                      '"refs": ["notes/projects/AuthService/Genel-Bakis.md"]}\n---\nTest oturumu tamamlandı.\n')
 
         root, state = self.make_vault("personal")
-        repo = self.make_repo("authhub")
-        vault.register_project(root, "authhub", [repo], name="AuthHub")
+        repo = self.make_repo("authservice")
+        vault.register_project(root, "authservice", [repo], name="AuthService")
         res = migrate.import_from_beyin_v3(v3, root, state_dir=state)
 
         self.assertEqual(res["skipped_generated"], ["knowledge/v3/outcomes.md"])
@@ -232,18 +232,18 @@ class MigrateTests(IsolatedCase):
         self.assertIn("Kısa ve net cevap", (root / "Core.md").read_text(encoding="utf-8"))
         self.assertTrue((root / "knowledge/companion/Son-Oturum-Gecmisi.md").exists())
         self.assertTrue((root / "knowledge/companion/Genel-Acik-Konular.md").exists())
-        self.assertTrue((root / "receipts/2026-11/ffe2d0dc0950ec79.md").exists())
+        self.assertTrue((root / "receipts/2026-11/a1b2c3d4e5f60718.md").exists())
 
         old_meta, old_body = parse_markdown(
-            (root / "projects/authhub/kararlar/2026-09-07-ilk.md").read_text(encoding="utf-8"))
+            (root / "projects/authservice/kararlar/2026-09-07-ilk.md").read_text(encoding="utf-8"))
         self.assertEqual(old_meta["kind"], "decision")
         self.assertEqual(old_meta["date"], "2026-09-07")
         self.assertEqual(old_meta["status"], "superseded")
-        self.assertIn("[[projects/authhub/AuthHub|AuthHub genel bakış]]", old_body)
+        self.assertIn("[[projects/authservice/AuthService|AuthService genel bakış]]", old_body)
         self.assertNotIn("beyin-baglantilar", old_body)
 
-        hits = vault.search_memory(root, "karar", project="authhub", kind="decision", state_dir=state)
-        self.assertEqual([h["doc_id"] for h in hits], ["projects/authhub/kararlar/2026-09-10-yeni.md"])
+        hits = vault.search_memory(root, "karar", project="authservice", kind="decision", state_dir=state)
+        self.assertEqual([h["doc_id"] for h in hits], ["projects/authservice/kararlar/2026-09-10-yeni.md"])
 
     def test_source_target_overlap_rejected(self):
         root, state = self.make_vault("work")

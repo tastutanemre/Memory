@@ -7,20 +7,22 @@ description: İkinci Beyin (`mem`) hafızası — oturum başında bağlam yükl
 
 `mem` MCP sunucusu bağlıysa (araçlar `memory_*` adıyla görünür; Devin Desktop'ta slash komutları `/mcp__mem__start`, `/mcp__mem__decide`, `/mcp__mem__wrapup`):
 
-1. **Oturum başı:** `memory_bootstrap` çağır (`cwd` = aktif çalışma alanı yolu, zorunlu; mümkünse `task_hint` ver). Dönen kuralları oturum boyunca uygula. **Sonraki her `memory_*` çağrısında da aynı `cwd`'yi gönder** (MCP sunucusu IDE'nin başlattığı dizinde çalışır, repo dizininde değil).
+1. **Oturum başı:** `memory_bootstrap` çağır (`cwd` = aktif çalışma alanı yolu, zorunlu; mümkünse `task_hint` ver; isteğe bağlı `budget_chars` varsayılan `8000`). Dönen kuralları oturum boyunca uygula. **Sonraki her `memory_*` çağrısında da aynı `cwd`'yi gönder** (MCP sunucusu IDE'nin başlattığı dizinde çalışır, repo dizininde değil).
    - Yanıt `status: unregistered_workspace` ise bu repo beyaz listede değildir: **hafızaya hiçbir şey yazma, hafızadan bilgi aktarma.** Kullanıcı isterse `mem project add <slug> --root <repo>` ile kaydedebilir.
-2. **Geçmişi sorgula:** karar/kural/"neden" sorularında `memory_search` (Türkçe çekimli sorgular desteklenir). Bir notu yamalamadan önce `memory_read` ile `sha256` al.
-3. **Karar verilince:** `memory_decide` (title, decision, context, alternatives, rationale). `duplicate_warning` dönerse mevcut ADR'yi göster; eskisinin yerine geçiyorsa `supersedes` ver, aksi halde yazma.
-4. **Düzeltme alınca:** `memory_rule` (kısa, tek satır, gerekçeyle).
-5. **İş bitince:** `memory_finish` (summary, open_threads, refs). Önemsiz ayrıntıyı yazma.
-6. **Düzenleme:** `memory_patch` yalnız `expected_sha256` ile; `ConcurrencyConflictError` alırsan notu yeniden oku.
+2. **Geçmişi sorgula:** karar/kural/"neden" sorularında `memory_search` (`query`, `cwd`, isteğe bağlı `limit`, `include_superseded`, `include_archived`; Türkçe çekimli sorgular desteklenir). Bir notu yamalamadan önce `memory_read` ile `sha256` al.
+3. **Karar verilince:** `memory_decide` (`title`, `decision`, `cwd`; isteğe bağlı `context`, `alternatives`, `rationale`, `supersedes`, `sources`, `tags`, `shared=true`, `force=true`).
+   - Projeler arası ortak kararlar için `shared=true` ver (`knowledge/kararlar/` altına yazar).
+   - Yanıt `duplicate_warning` veya `advisor_warning` dönerse mevcut kararı ve uyarıyı kullanıcıya göster; eski kararın yerine geçiyorsa `supersedes` ver, kullanıcı açıkça onaylarsa `force=true` kullan, aksi halde yazma.
+4. **Düzeltme alınca:** `memory_rule` (`rule`, `cwd`; isteğe bağlı `reason` ve `scope='global'` veya proje slug'ı). Kısa, tek satır ve gerekçeli yaz.
+5. **İş bitince:** `memory_finish` (`summary`, `cwd`; isteğe bağlı `open_threads`, `refs`, `session_id`, `harness`). Önemsiz ayrıntıyı yazma.
+6. **Düzenleme:** `memory_patch` (`path`, `expected_sha256`, `edits: [{"old": "...", "new": "..."}]`, `cwd`). Her `old` metni dosyada tam 1 kez geçmeli; `ConcurrencyConflictError` alırsan notu `memory_read` ile yeniden oku.
 
 ## Yasaklar
 
 - Parola, token, API anahtarı, bağlantı dizesi, TCKN/IBAN gibi kişisel veri yazma. DLP kalkanı `work` profilinde isteği **reddeder** (`DLPBlockedError`), `personal` profilinde maskeler (`[REDACTED:...]`). Reddedilince hassas kısmı çıkarıp tekrar dene; kalkanı atlatmaya çalışma.
 - Başka projenin notunu okuma/yazma; kasa dışına çıkan yol verme.
-- Şirket git reposuna hafıza dosyası yazma.
+- Çalışma alanı git reposuna hafıza dosyası yazma.
 
 ## CLI karşılıkları
 
-`python mem.py bootstrap|search|decide|rule|finish|patch|doctor` (`--json` ile makine okunur çıktı).
+`python mem.py init|project|bootstrap|search|read|decide|rule|patch|finish|sync|connect|profiles|advisor|doctor` (`--json` ile makine okunur çıktı).

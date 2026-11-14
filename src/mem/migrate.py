@@ -1,4 +1,4 @@
-"""Eski beyin_v3 kasasindan tek yonlu, salt-okunur `import-v3` tasiyici."""
+"""Eski Markdown kasasindan tek yonlu, salt-okunur `import-v3` tasiyici."""
 
 from __future__ import annotations
 
@@ -181,7 +181,7 @@ def _collect_receipts(src: Path, now_ym: str) -> tuple[list[tuple[str, Path, str
 
 
 def _collect_companion(src: Path) -> list[tuple[str, Path, str, str]]:
-    """`🔮 850-Companion` gibi klasorlerden Core, Last-Session ve Threads dosyalarini toplar."""
+    """`Companion` adini tasiyan ust klasorlerden Core, Last-Session ve Threads dosyalarini toplar."""
     out: list[tuple[str, Path, str, str]] = []
     try:
         entries = sorted(src.iterdir(), key=lambda p: p.name)

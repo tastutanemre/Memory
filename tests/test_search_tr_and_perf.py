@@ -25,12 +25,12 @@ class TurkishUnitTests(unittest.TestCase):
                 self.assertEqual(stem_tr(f), stem_tr(base), f"{f} != {base}")
 
     def test_technical_terms_not_stemmed(self):
-        for t in ("AuthHub", "PostgreSQL", "claude", "FastAPI", "oauth2", "mcp_config", "utf-8", "sha256",
+        for t in ("AuthService", "PostgreSQL", "claude", "FastAPI", "oauth2", "mcp_config", "utf-8", "sha256",
                   "docker", "token", "server", "v3.12", "JWT"):
             self.assertTrue(is_technical_token(t), t)
             tokens = index_tokens(t).split()
             self.assertEqual(tokens, [fold_tr(t)], t)
-        self.assertEqual(index_tokens("AuthHub"), "authhub")
+        self.assertEqual(index_tokens("AuthService"), "authservice")
         self.assertEqual(index_tokens("mcp_config"), "mcp_config")
         self.assertFalse(is_technical_token("bağlantı"))
         self.assertIn("baglantilari", index_tokens("bağlantıları").split())
@@ -78,9 +78,9 @@ class SearchTests(IsolatedCase):
 
     def test_technical_terms_intact(self):
         self.write_md(self.root, "knowledge/tech.md",
-                      "# Teknik\n\nAuthHub claude ile mcp_config dosyasını okur. PostgreSQL ve FastAPI kullanılır.\n")
+                      "# Teknik\n\nAuthService claude ile mcp_config dosyasını okur. PostgreSQL ve FastAPI kullanılır.\n")
         self.write_md(self.root, "knowledge/other.md", "# Diğer\n\nAlakasız metin burada.\n")
-        for q in ("AuthHub", "claude", "mcp_config", "PostgreSQL", "FastAPI", "authhub"):
+        for q in ("AuthService", "claude", "mcp_config", "PostgreSQL", "FastAPI", "authservice"):
             self.assertEqual(self.ids(q)[:1], ["knowledge/tech.md"], q)
         self.assertNotIn("knowledge/other.md", self.ids("mcp_config"))
 
