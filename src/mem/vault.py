@@ -8,7 +8,7 @@ import os
 import posixpath
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -40,6 +40,7 @@ __all__ = [
     "add_rule",
     "patch_note",
     "finish_session",
+    "compact_receipts",
     "read_note",
     "search_memory",
     "sync_index",
@@ -47,7 +48,10 @@ __all__ = [
 ]
 
 UNREGISTERED_MESSAGE = "Bu çalışma alanı hafıza beyaz listesinde değil."
-SESSION_LIMIT = 3000
+SESSION_LIMIT = 6000
+SESSION_MAX_CARDS = 5
+SESSION_MIN_CARDS = 3
+MIN_HANDOFF_CHARS = 1200
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 LINKS_START = "<!-- mem-links -->"
 LINKS_END = "<!-- /mem-links -->"
@@ -342,8 +346,22 @@ def _norm_root(root) -> str:
     return p.rstrip("/")
 
 
+def _normalize_tags(tags: list[str] | None) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in tags or []:
+        s = (t or "").strip()
+        if not s:
+            continue
+        norm = slugify(s, 24)
+        if norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
 def register_project(vault_root, slug: str, repo_roots, name: str | None = None,
-                     description: str = "", state_dir=None) -> dict:
+                     description: str = "", state_dir=None, tags: list[str] | None = None) -> dict:
     if not SLUG_RE.match(slug or ""):
         raise VaultError("Proje slug'i yalnız küçük harf, rakam ve tire içerebilir (örn. order-service).")
     if isinstance(repo_roots, (str, Path)):
@@ -351,6 +369,7 @@ def register_project(vault_root, slug: str, repo_roots, name: str | None = None,
     roots = [_norm_root(r) for r in repo_roots]
     if not roots:
         raise VaultError("En az bir repo kökü gerekli.")
+    norm_tags = _normalize_tags(tags) if tags is not None else None
     ctx = _ctx(vault_root, state_dir)
     now = _now()
     with _Session(ctx) as sess:
@@ -360,6 +379,8 @@ def register_project(vault_root, slug: str, repo_roots, name: str | None = None,
         existing = next((p for p in projects if p["slug"] == slug), None)
         if existing is None:
             entry = {"slug": slug, "name": name or slug, "roots": roots, "description": desc}
+            if norm_tags is not None:
+                entry["tags"] = norm_tags
             projects.append(entry)
             action = "created"
         else:
@@ -371,6 +392,8 @@ def register_project(vault_root, slug: str, repo_roots, name: str | None = None,
                 entry["name"] = name
             if desc:
                 entry["description"] = desc
+            if norm_tags is not None:
+                entry["tags"] = norm_tags
             action = "updated"
         config.save_projects(ctx.vault_root, projects)
         store.log_event(sess.conn, "project_add", "projects.json", None, sess.actor,
@@ -387,7 +410,7 @@ def register_project(vault_root, slug: str, repo_roots, name: str | None = None,
         sess.sync()
         _refresh_hub(sess, slug)
         sess.sync()
-    return {"status": action, "slug": slug, "name": pname, "roots": entry["roots"]}
+    return {"status": action, "slug": slug, "name": pname, "roots": entry["roots"], "tags": entry.get("tags", [])}
 
 
 # ---------------------------------------------------------------- hub
@@ -570,6 +593,39 @@ def read_note(vault_root, path: str, project: str | None = None, state_dir=None)
 # ---------------------------------------------------------------- bootstrap
 
 _POINTER_RE = re.compile(r"^\s*- \[kapsam: ([^\]]+)\]")
+_RULE_LINE_RE = re.compile(
+    r"^\s*-\s+\*\*\[[^\]]*\]\*\*\s+(?:\{tags:\s*([^}]*)\}\s+)?(.*?)(?:\s+\*\(Gerekçe:.*\)\*)?\s*$"
+)
+
+
+def _filter_global_rules(grules: str, root: Path, slug: str | None) -> str:
+    if slug is None:
+        return grules
+    proj_info = config.get_project(root, slug) or {}
+    proj_tags = {slugify(t, 24) for t in (proj_info.get("tags") or []) if t} | {slug}
+    kept: list[str] = []
+    hidden_rules = 0
+    for ln in grules.split("\n"):
+        pm = _POINTER_RE.match(ln)
+        if pm:
+            if pm.group(1).strip() == slug:
+                kept.append(ln)
+            continue
+        rm = _RULE_LINE_RE.match(ln)
+        if rm and rm.group(1):
+            rtags = {slugify(x.strip(), 24) for x in rm.group(1).split(",") if x.strip()}
+            if rtags and not (rtags & proj_tags):
+                hidden_rules += 1
+                continue
+        kept.append(ln)
+    out = "\n".join(kept).strip()
+    if hidden_rules > 0:
+        notice = (
+            f'- _({hidden_rules} etiketli genel kural bu projeyle eşleşmediği için gizlendi; '
+            f'tamamı için `memory_read("Kurallar.md")`)_'
+        )
+        out = (out + "\n" + notice).strip() if out else notice
+    return out
 
 
 def _read_if_exists(root: Path, doc_id: str) -> str | None:
@@ -604,11 +660,7 @@ def bootstrap_context(vault_root, state_dir=None, cwd=None, project: str | None 
     try:
         store.sync_vault(conn, ctx.vault_root)
         core = _read_if_exists(root, "Core.md") or ""
-        grules = _read_if_exists(root, "Kurallar.md") or ""
-        grules = "\n".join(
-            ln for ln in grules.split("\n")
-            if not (_POINTER_RE.match(ln) and _POINTER_RE.match(ln).group(1).strip() != slug)
-        ).strip()
+        grules = _filter_global_rules(_read_if_exists(root, "Kurallar.md") or "", root, slug)
         prules = _read_if_exists(root, f"projects/{slug}/Kurallar.md") if slug else None
         threads = _read_if_exists(root, f"projects/{slug}/Acik-Konular.md") if slug else None
         last = _read_if_exists(root, f"projects/{slug}/Son-Oturum.md") if slug else None
@@ -619,6 +671,7 @@ def bootstrap_context(vault_root, state_dir=None, cwd=None, project: str | None 
             if slug:
                 skip |= {f"projects/{slug}/{n}" for n in ("Kurallar.md", "Acik-Konular.md", "Son-Oturum.md")}
             for r in search_vault(conn, task_hint, project=slug, limit=10,
+                                  kinds=["decision", "rule", "knowledge", "note", "overview"],
                                   reranker=_gate_external(ctx, reranker)):
                 if r["doc_id"] in skip:
                     continue
@@ -637,25 +690,33 @@ def bootstrap_context(vault_root, state_dir=None, cwd=None, project: str | None 
         mandatory.append(f"## Proje kuralları ({slug})\n\n" + (prules or "(kural yok)"))
         sources.append(f"projects/{slug}/Kurallar.md")
     text = "\n\n".join(mandatory)
-    optional: list[tuple[str, str]] = []
+    if len(text) > budget_chars:
+        text += (
+            f"\n\n> Not: Zorunlu kurallar ({len(text)} karakter) {budget_chars} karakterlik bütçeyi aştı; "
+            "açık konular ve son oturum taban payla eklendi."
+        )
+    handoff: list[tuple[str, str]] = []
+    if threads is not None:
+        handoff.append((f"## Açık konular ({slug})", threads))
+        sources.append(f"projects/{slug}/Acik-Konular.md")
+    if last is not None and last.strip():
+        handoff.append((f"## Son oturum ({slug})", last))
+        sources.append(f"projects/{slug}/Son-Oturum.md")
+    for idx, (heading, content) in enumerate(handoff):
+        remaining = budget_chars - len(text) - len(heading) - 4
+        handoff_left = len(handoff) - idx
+        share = max(MIN_HANDOFF_CHARS, remaining // handoff_left)
+        limit = max(MIN_HANDOFF_CHARS, min(remaining, share))
+        text += f"\n\n{heading}\n\n" + _trim_tail(content, limit)
     if relevant:
         rel = "\n\n".join(f"- **{r['title']}** (`{r['doc_id']}`)\n  {r['snippet']}" for r in relevant)
-        optional.append(("## İlgili notlar (görev ipucu)", rel))
+        heading = "## İlgili notlar (görev ipucu)"
         sources.extend(r["doc_id"] for r in relevant)
-    if last is not None and last.strip():
-        optional.append((f"## Son oturum ({slug})", last))
-        sources.append(f"projects/{slug}/Son-Oturum.md")
-    if threads is not None:
-        optional.append((f"## Açık konular ({slug})", threads))
-        sources.append(f"projects/{slug}/Acik-Konular.md")
-    for idx, (heading, content) in enumerate(optional):
         remaining = budget_chars - len(text) - len(heading) - 4
-        if remaining < 80:
-            text += f"\n\n{heading}\n\n(bütçe nedeniyle atlandı; memory_read ile oku)"
-            continue
-        left = len(optional) - idx
-        share = remaining if left <= 1 else max(1200, remaining // left)
-        text += f"\n\n{heading}\n\n" + _trim_tail(content, min(remaining, share))
+        if remaining < 120:
+            text += f"\n\n{heading}\n\n(bütçe nedeniyle atlandı; memory_search ile ara)"
+        else:
+            text += f"\n\n{heading}\n\n" + _trim_tail(rel, remaining)
     return {
         "status": "ok",
         "project": slug,
@@ -698,118 +759,35 @@ def _resolve_ref(sess: _Session, ref: str, folder: str) -> str:
     return r
 
 
-def record_decision(vault_root, project: str | None, title: str, decision: str, context: str = "",
-                    alternatives: str = "", rationale: str = "", supersedes: list[str] | None = None,
-                    sources: list[str] | None = None, tags: list[str] | None = None,
-                    force: bool = False, state_dir=None, actor: str = "mem",
-                    advisor: DecisionAdvisor | None = None) -> dict:
-    if not (title or "").strip() or not (decision or "").strip():
-        raise VaultError("title ve decision zorunlu.")
-    ctx = _ctx(vault_root, state_dir)
-    slug = None if project in (None, "", "shared") else project
-    if slug is not None and config.get_project(ctx.vault_root, slug) is None:
-        raise VaultError(f"Bilinmeyen proje: {slug!r}")
-    folder = f"projects/{slug}/kararlar" if slug else "knowledge/kararlar"
-    now = _now()
-    with _Session(ctx, actor) as sess:
-        values, cats = _shield_all(
-            sess, [title, decision, context, alternatives, rationale] + list(sources or []) + list(tags or [])
-        )
-        title, decision, context, alternatives, rationale = [v.strip() for v in values[:5]]
-        n_src = len(sources or [])
-        sources_c = values[5 : 5 + n_src]
-        tags_c = values[5 + n_src :]
-        sess.sync()
-        old_ids = [_resolve_ref(sess, s, folder) for s in (supersedes or [])]
-
-        if not force and not old_ids:
-            rows = sess.conn.execute(
-                "SELECT doc_id, title FROM documents WHERE kind='decision' AND status='active' AND project IS ? "
-                "AND doc_id NOT IN (SELECT older_doc_id FROM supersedes)",
-                (slug,),
-            ).fetchall()
-            ft = fold_tr(title)
-            fd = fold_tr(decision)[:300]
-            for r in rows:
-                same_title = difflib.SequenceMatcher(None, ft, fold_tr(r["title"])).ratio() >= 0.9
-                other = ""
-                try:
-                    other = _field(sess.read(r["doc_id"]), "Karar")
-                except OSError:
-                    pass
-                same_dec = bool(other) and difflib.SequenceMatcher(None, fd, fold_tr(other)[:300]).ratio() >= 0.9
-                if same_title or same_dec:
-                    return {
-                        "status": "duplicate_warning",
-                        "existing": r["doc_id"],
-                        "message": "Benzer aktif karar zaten var. Yerine geçiyorsa supersedes ver; "
-                                   "yine de yazmak için force=true kullan.",
-                    }
-
-        if not force and advisor is not None and config.can_use_advisor(ctx.profile, ctx.dlp_mode):
-            warned = _advisor_review(sess, advisor, slug, title, decision, context, alternatives,
-                                     rationale, set(old_ids))
-            if warned is not None:
-                return warned
-
-        folder = f"projects/{slug}/kararlar" if slug else "knowledge/kararlar"
-        date = now.strftime("%Y-%m-%d")
-        base = f"{folder}/{date}-{slugify(title)}"
-        doc_id = base + ".md"
-        n = 2
-        while sess.exists(doc_id):
-            doc_id = f"{base}-{n}.md"
-            n += 1
-        meta = {
-            "title": title,
-            "kind": "decision",
-            "project": slug,
-            "status": "active",
-            "date": date,
-            "created_at": _iso(now),
-            "updated_at": _iso(now),
-            "tags": tags_c,
-            "supersedes": old_ids,
-            "sources": sources_c,
-        }
-        lines = [f"# {title}", "", f"**Karar:** {decision}"]
-        if context:
-            lines.append(f"**Bağlam:** {context}")
-        if alternatives:
-            lines.append(f"**Alternatifler:** {alternatives}")
-        if rationale:
-            lines.append(f"**Gerekçe:** {rationale}")
-        lines.append("**Durum:** geçerli")
-        if sources_c:
-            lines.append("**Kaynak:** " + ", ".join(sources_c))
-        if slug:
-            pname = (config.get_project(ctx.vault_root, slug) or {}).get("name", slug)
-            hub_link = project_hub_doc_id(ctx.vault_root, slug, pname)[:-3]
-            lines += ["", f"Proje: [[{hub_link}|{pname} genel bakış]]"]
-        sha = sess.write(doc_id, _meta_doc(meta, "\n".join(lines) + "\n"), "decide", {"supersedes": old_ids})
-
-        for old in old_ids:
-            otext = sess.read(old)
-            ometa, obody = parse_markdown(otext)
-            ometa["status"] = "superseded"
-            ometa["superseded_by"] = doc_id
-            _touch(ometa, now)
-            status_line = f"**Durum:** Yerine geçen: [[{doc_id[:-3]}|{title.replace('|', '/')}]]"
-            if re.search(r"^\*\*Durum:\*\*.*$", obody, re.M):
-                obody = re.sub(r"^\*\*Durum:\*\*.*$", lambda _m: status_line, obody, count=1, flags=re.M)
-            else:
-                obody = obody.rstrip("\n") + "\n\n" + status_line + "\n"
-            sess.write(old, _meta_doc(ometa, obody), "supersede", {"by": doc_id})
-        sess.sync()
-        if slug:
-            _refresh_hub(sess, slug)
-            sess.sync()
-    return {"status": "created", "path": doc_id, "sha256": sha, "superseded": old_ids, "dlp_categories": cats}
+def _find_duplicate_decision(sess: _Session, slug: str | None, title: str, decision: str) -> dict | None:
+    rows = sess.conn.execute(
+        "SELECT doc_id, title FROM documents WHERE kind='decision' AND status='active' AND project IS ? "
+        "AND doc_id NOT IN (SELECT older_doc_id FROM supersedes)",
+        (slug,),
+    ).fetchall()
+    ft = fold_tr(title)
+    fd = fold_tr(decision)[:300]
+    for r in rows:
+        same_title = difflib.SequenceMatcher(None, ft, fold_tr(r["title"])).ratio() >= 0.9
+        other = ""
+        try:
+            other = _field(sess.read(r["doc_id"]), "Karar")
+        except OSError:
+            pass
+        same_dec = bool(other) and difflib.SequenceMatcher(None, fd, fold_tr(other)[:300]).ratio() >= 0.9
+        if same_title or same_dec:
+            return {
+                "status": "duplicate_warning",
+                "existing": r["doc_id"],
+                "message": "Benzer aktif karar zaten var. Yerine geçiyorsa supersedes ver; "
+                           "yine de yazmak için force=true kullan.",
+            }
+    return None
 
 
-def _advisor_review(sess: _Session, advisor: DecisionAdvisor, slug: str | None, title: str, decision: str,
-                    context: str, alternatives: str, rationale: str, skip_ids: set[str]) -> dict | None:
-    """Harici danismana yalniz DLP-temiz taslak + onceki kararlari sorar; hata = fail-open (None)."""
+def _collect_advisor_inputs(sess: _Session, slug: str | None, title: str, decision: str,
+                            context: str, alternatives: str, rationale: str,
+                            skip_ids: set[str]) -> tuple[dict, list[dict]] | None:
     vault_root = sess.ctx.vault_root
     proposal = {"project": slug, "title": title, "decision": decision, "context": context,
                 "alternatives": alternatives, "rationale": rationale}
@@ -833,6 +811,10 @@ def _advisor_review(sess: _Session, advisor: DecisionAdvisor, slug: str | None, 
         if any(dlp.scan(v, vault_root) for v in (prior["title"], prior["decision"], prior["rationale"]) if v):
             continue
         priors.append(prior)
+    return proposal, priors
+
+
+def _run_advisor(advisor: DecisionAdvisor, proposal: dict, priors: list[dict]) -> dict | None:
     try:
         adv = advisor.assess_decision(proposal, priors)
     except Exception:  # noqa: BLE001 - harici danisman hatasi karar kaydini asla engellememeli
@@ -851,17 +833,191 @@ def _advisor_review(sess: _Session, advisor: DecisionAdvisor, slug: str | None, 
     return None
 
 
+def _write_decision(sess: _Session, ctx: _Ctx, slug: str | None, folder: str, now: datetime,
+                    title: str, decision: str, context: str, alternatives: str, rationale: str,
+                    old_ids: list[str], sources_c: list[str], tags_c: list[str], cats: list[str]) -> dict:
+    date = now.strftime("%Y-%m-%d")
+    base = f"{folder}/{date}-{slugify(title)}"
+    doc_id = base + ".md"
+    n = 2
+    while sess.exists(doc_id):
+        doc_id = f"{base}-{n}.md"
+        n += 1
+    meta = {
+        "title": title,
+        "kind": "decision",
+        "project": slug,
+        "status": "active",
+        "date": date,
+        "created_at": _iso(now),
+        "updated_at": _iso(now),
+        "tags": tags_c,
+        "supersedes": old_ids,
+        "sources": sources_c,
+    }
+    lines = [f"# {title}", "", f"**Karar:** {decision}"]
+    if context:
+        lines.append(f"**Bağlam:** {context}")
+    if alternatives:
+        lines.append(f"**Alternatifler:** {alternatives}")
+    if rationale:
+        lines.append(f"**Gerekçe:** {rationale}")
+    lines.append("**Durum:** geçerli")
+    if sources_c:
+        lines.append("**Kaynak:** " + ", ".join(sources_c))
+    if slug:
+        pname = (config.get_project(ctx.vault_root, slug) or {}).get("name", slug)
+        hub_link = project_hub_doc_id(ctx.vault_root, slug, pname)[:-3]
+        lines += ["", f"Proje: [[{hub_link}|{pname} genel bakış]]"]
+    sha = sess.write(doc_id, _meta_doc(meta, "\n".join(lines) + "\n"), "decide", {"supersedes": old_ids})
+
+    for old in old_ids:
+        otext = sess.read(old)
+        ometa, obody = parse_markdown(otext)
+        ometa["status"] = "superseded"
+        ometa["superseded_by"] = doc_id
+        _touch(ometa, now)
+        status_line = f"**Durum:** Yerine geçen: [[{doc_id[:-3]}|{title.replace('|', '/')}]]"
+        if re.search(r"^\*\*Durum:\*\*.*$", obody, re.M):
+            obody = re.sub(r"^\*\*Durum:\*\*.*$", lambda _m: status_line, obody, count=1, flags=re.M)
+        else:
+            obody = obody.rstrip("\n") + "\n\n" + status_line + "\n"
+        sess.write(old, _meta_doc(ometa, obody), "supersede", {"by": doc_id})
+    sess.sync()
+    if slug:
+        _refresh_hub(sess, slug)
+        sess.sync()
+    return {"status": "created", "path": doc_id, "sha256": sha, "superseded": old_ids, "dlp_categories": cats}
+
+
+def _check_not_already_superseded(sess: _Session, old_ids: list[str]) -> None:
+    for old in old_ids:
+        ometa, _ = parse_markdown(sess.read(old))
+        if ometa.get("status") == "superseded":
+            by = ometa.get("superseded_by") or "başka bir karar"
+            raise VaultError(
+                f"{old} zaten geçersiz kılınmış (yerine geçen: {by}). "
+                "Güncel kararı supersedes olarak verin veya force=true kullanın."
+            )
+
+
+def record_decision(vault_root, project: str | None, title: str, decision: str, context: str = "",
+                    alternatives: str = "", rationale: str = "", supersedes: list[str] | None = None,
+                    sources: list[str] | None = None, tags: list[str] | None = None,
+                    force: bool = False, state_dir=None, actor: str = "mem",
+                    advisor: DecisionAdvisor | None = None) -> dict:
+    if not (title or "").strip() or not (decision or "").strip():
+        raise VaultError("title ve decision zorunlu.")
+    raw_inputs = [title, decision, context, alternatives, rationale] + list(sources or []) + list(tags or [])
+    n_src = len(sources or [])
+    ctx = _ctx(vault_root, state_dir)
+    slug = None if project in (None, "", "shared") else project
+    if slug is not None and config.get_project(ctx.vault_root, slug) is None:
+        raise VaultError(f"Bilinmeyen proje: {slug!r}")
+    folder = f"projects/{slug}/kararlar" if slug else "knowledge/kararlar"
+    now = _now()
+    use_advisor = not force and advisor is not None and config.can_use_advisor(ctx.profile, ctx.dlp_mode)
+    advisor_payload: tuple[dict, list[dict]] | None = None
+    with _Session(ctx, actor) as sess:
+        values, cats = _shield_all(sess, raw_inputs)
+        title_c, decision_c, context_c, alternatives_c, rationale_c = [v.strip() for v in values[:5]]
+        sources_c = values[5 : 5 + n_src]
+        tags_c = values[5 + n_src :]
+        sess.sync()
+        old_ids = [_resolve_ref(sess, s, folder) for s in (supersedes or [])]
+        if not force:
+            _check_not_already_superseded(sess, old_ids)
+        if not force and not old_ids:
+            dup = _find_duplicate_decision(sess, slug, title_c, decision_c)
+            if dup is not None:
+                return dup
+        if use_advisor:
+            advisor_payload = _collect_advisor_inputs(
+                sess, slug, title_c, decision_c, context_c, alternatives_c, rationale_c, set(old_ids)
+            )
+        if not use_advisor or advisor_payload is None:
+            return _write_decision(
+                sess, ctx, slug, folder, now, title_c, decision_c, context_c, alternatives_c, rationale_c,
+                old_ids, sources_c, tags_c, cats,
+            )
+
+    # Harici danisman cagrisi VaultLock disinda yapilir; ag gecikmesi diger ajanlari bloklamaz.
+    warned = _run_advisor(advisor, advisor_payload[0], advisor_payload[1])  # type: ignore[arg-type]
+    if warned is not None:
+        return warned
+
+    ctx = _ctx(vault_root, state_dir)
+    with _Session(ctx, actor) as sess:
+        values, cats = _shield_all(sess, raw_inputs)
+        title_c, decision_c, context_c, alternatives_c, rationale_c = [v.strip() for v in values[:5]]
+        sources_c = values[5 : 5 + n_src]
+        tags_c = values[5 + n_src :]
+        sess.sync()
+        old_ids = [_resolve_ref(sess, s, folder) for s in (supersedes or [])]
+        if not force:
+            _check_not_already_superseded(sess, old_ids)
+        if not force and not old_ids:
+            dup = _find_duplicate_decision(sess, slug, title_c, decision_c)
+            if dup is not None:
+                return dup
+        return _write_decision(
+            sess, ctx, slug, folder, now, title_c, decision_c, context_c, alternatives_c, rationale_c,
+            old_ids, sources_c, tags_c, cats,
+        )
+
+
 # ---------------------------------------------------------------- kural
 
 
 def _rule_text(line: str) -> str:
-    m = re.match(r"^\s*-\s+\*\*\[[^\]]*\]\*\*\s+(.*?)(?:\s+\*\(Gerekçe:.*\)\*)?\s*$", line)
-    return fold_tr(m.group(1)) if m else ""
+    m = _RULE_LINE_RE.match(line)
+    return fold_tr(m.group(2)) if m else ""
 
 
-def add_rule(vault_root, scope: str, rule_text: str, reason: str = "", state_dir=None,
-             actor: str = "mem") -> dict:
-    if not (rule_text or "").strip():
+def _find_rule_line(lines: list[str], query_text: str) -> int:
+    q = fold_tr(" ".join((query_text or "").split()))
+    if not q:
+        raise VaultError("Eşleştirilecek kural metni boş olamaz.")
+    exact = [i for i, ln in enumerate(lines) if _rule_text(ln) == q]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise VaultError(f"Birden fazla kural eşleşti ({len(exact)}); daha belirgin metin verin.")
+    if len(q) >= 10:
+        sub = [i for i, ln in enumerate(lines) if _rule_text(ln) and q in _rule_text(ln)]
+        if len(sub) == 1:
+            return sub[0]
+        if len(sub) > 1:
+            raise VaultError(f"Birden fazla kural eşleşti ({len(sub)}); daha belirgin metin verin.")
+    raise VaultError(f"Eşleşen kural bulunamadı: {query_text!r}")
+
+
+def _archive_rule(sess: _Session, doc_id: str, old_line: str, note: str, now: datetime) -> str:
+    month = now.strftime("%Y-%m")
+    arch_id = f"archive/{month}.md"
+    if sess.exists(arch_id):
+        existing = sess.read(arch_id)
+    else:
+        existing = _meta_doc(
+            {"title": f"Arşiv {month}", "kind": "note", "status": "archived", "created_at": _iso(now)},
+            f"# Arşiv {month}\n",
+        )
+    entry = f"\n<!-- kurallar: {doc_id} -->\n- ~~{old_line.strip()}~~ *({note})*\n"
+    sess.write(arch_id, existing.rstrip("\n") + "\n" + entry, "archive_rule")
+    return arch_id
+
+
+def add_rule(vault_root, scope: str, rule_text: str = "", reason: str = "", state_dir=None,
+             actor: str = "mem", tags: list[str] | None = None,
+             supersedes: str | None = None, remove: bool | str = False) -> dict:
+    is_remove = bool(remove.strip()) if isinstance(remove, str) else bool(remove)
+    if is_remove:
+        if isinstance(remove, str) and (rule_text or "").strip():
+            raise VaultError("remove ile yeni kural metni birlikte verilemez; yerine koymak için supersedes kullanın.")
+        remove_query = remove.strip() if isinstance(remove, str) else (rule_text or "").strip()
+        if not remove_query:
+            raise VaultError("Kaldırılacak kural metni boş olamaz.")
+    elif not (rule_text or "").strip():
         raise VaultError("Kural metni boş olamaz.")
     ctx = _ctx(vault_root, state_dir)
     if scope in (None, "", "global", VAULT_SCOPE):
@@ -872,17 +1028,51 @@ def add_rule(vault_root, scope: str, rule_text: str, reason: str = "", state_dir
         doc_id = f"projects/{scope}/Kurallar.md"
     now = _now()
     with _Session(ctx, actor) as sess:
-        (text, rsn), cats = _shield_all(sess, [rule_text, reason])
-        text = " ".join(text.split())
-        rsn = " ".join(rsn.split())
-        line = f"- **[{now.strftime('%Y-%m-%d')}]** {text}" + (f" *(Gerekçe: {rsn})*" if rsn else "")
+        if is_remove:
+            (rq, rsn), cats = _shield_all(sess, [remove_query, reason])
+            rsn = " ".join(rsn.split())
+            current = sess.read(doc_id)
+            lines = current.split("\n")
+            idx = _find_rule_line(lines, rq)
+            old_line = lines.pop(idx)
+            new_text = "\n".join(lines).rstrip("\n") + "\n"
+            sha = sess.write(doc_id, new_text, "rule_remove")
+            arch_id = _archive_rule(sess, doc_id, old_line, f"kaldırıldı: {rsn or 'remove'}", now)
+            sess.sync()
+            return {"status": "removed", "path": doc_id, "removed_line": old_line, "archived": [arch_id],
+                    "sha256": sha, "dlp_categories": cats}
+
+        raw_tags = list(tags or [])
+        vals, cats = _shield_all(sess, [rule_text, reason] + raw_tags)
+        text = " ".join(vals[0].split())
+        rsn = " ".join(vals[1].split())
+        norm_tags = _normalize_tags(vals[2:])
+        tag_part = f"{{tags: {', '.join(norm_tags)}}} " if norm_tags else ""
+        line = f"- **[{now.strftime('%Y-%m-%d')}]** {tag_part}{text}" + (f" *(Gerekçe: {rsn})*" if rsn else "")
         current = sess.read(doc_id)
+        lines = current.split("\n")
+        superseded_line = None
+        arch_ids: list[str] = []
+        if supersedes and supersedes.strip():
+            sup_q, _ = _shield_all(sess, [supersedes])
+            idx = _find_rule_line(lines, sup_q[0])
+            superseded_line = lines[idx]
+            rem_lines = lines[:idx] + lines[idx + 1 :]
+        else:
+            rem_lines = lines
         key = fold_tr(text)
-        if any(_rule_text(ln) == key for ln in current.split("\n")):
+        if any(_rule_text(ln) == key for ln in rem_lines):
             return {"status": "duplicate", "path": doc_id, "line": line}
-        sha = sess.write(doc_id, current.rstrip("\n") + "\n" + line + "\n", "rule")
+        if superseded_line is not None:
+            arch_ids.append(_archive_rule(sess, doc_id, superseded_line, f"yerine: {text}", now))
+        updated = "\n".join(rem_lines).rstrip("\n") + "\n" + line + "\n"
+        sha = sess.write(doc_id, updated, "rule")
         sess.sync()
-    return {"status": "added", "path": doc_id, "line": line, "sha256": sha, "dlp_categories": cats}
+    out = {"status": "added", "path": doc_id, "line": line, "sha256": sha, "dlp_categories": cats}
+    if superseded_line is not None:
+        out["superseded_line"] = superseded_line
+        out["archived"] = arch_ids
+    return out
 
 
 # ---------------------------------------------------------------- yama
@@ -978,11 +1168,201 @@ def _archive_card(sess: _Session, slug: str, card: str, now: datetime) -> str:
     return doc_id
 
 
+@dataclass
+class _ThreadItem:
+    id: str
+    owner: str
+    text: str
+
+
+_THREAD_LINE_RE = re.compile(r"^\s*-\s+\[\s*\]\s+(.*)$")
+_THREAD_TAG_RE = re.compile(r"\s*<!--\s*t:([a-z0-9_-]+)\s+h:([a-z0-9_-]+)\s*-->\s*$")
+
+
+def _make_thread_id(owner: str, text: str, used_ids: set[str]) -> str:
+    base = sha256_bytes(f"{owner}|{fold_tr(text)}".encode("utf-8"))
+    cand = base[:6]
+    if cand not in used_ids:
+        return cand
+    for length in range(7, len(base) + 1):
+        c = base[:length]
+        if c not in used_ids:
+            return c
+    n = 2
+    while f"{cand}-{n}" in used_ids:
+        n += 1
+    return f"{cand}-{n}"
+
+
+def _parse_threads(body: str) -> list[_ThreadItem]:
+    items: list[_ThreadItem] = []
+    used_ids: set[str] = set()
+    for ln in body.split("\n"):
+        s = ln.strip()
+        if not s or s.startswith("#") or s == "(açık konu yok)":
+            continue
+        m = _THREAD_LINE_RE.match(ln)
+        if not m:
+            continue
+        raw = m.group(1).strip()
+        tm = _THREAD_TAG_RE.search(raw)
+        if tm:
+            text = raw[: tm.start()].strip()
+            tid = tm.group(1).lower()
+            owner = tm.group(2).lower()
+            if tid in used_ids:
+                tid = _make_thread_id(owner, text, used_ids)
+        else:
+            text = raw
+            owner = "legacy"
+            tid = _make_thread_id(owner, text, used_ids)
+        if not text:
+            continue
+        used_ids.add(tid)
+        items.append(_ThreadItem(id=tid, owner=owner, text=text))
+    return items
+
+
+def _archive_closed_threads(sess: _Session, slug: str, items: list[_ThreadItem],
+                            tag: str, harness: str, now: datetime) -> str:
+    month = now.strftime("%Y-%m")
+    doc_id = f"archive/{month}.md"
+    if sess.exists(doc_id):
+        existing = sess.read(doc_id)
+    else:
+        existing = _meta_doc(
+            {"title": f"Arşiv {month}", "kind": "note", "status": "archived", "created_at": _iso(now)},
+            f"# Arşiv {month}\n",
+        )
+    lines = [
+        f"<!-- proje: {slug} · kapanan-konular -->",
+        f"## {now.strftime('%Y-%m-%d %H:%M')} · Kapanan Konular · {tag}",
+        "",
+    ]
+    for it in items:
+        lines.append(f"- [x] {it.text} *(açan: {it.owner}, kapatan: {harness}, t:{it.id})*")
+    block = "\n".join(lines)
+    sess.write(doc_id, existing.rstrip("\n") + "\n\n" + block + "\n", "archive_threads",
+               {"project": slug, "count": len(items)})
+    return doc_id
+
+
+def _match_close_selector(items: list[_ThreadItem], sel: str) -> list[_ThreadItem]:
+    id_probe = sel[2:].strip().lower() if sel.lower().startswith("t:") else sel.strip().lower()
+    txt_probe = fold_tr(" ".join(sel.split()))
+    return [it for it in items if it.id.lower() == id_probe or fold_tr(it.text) == txt_probe]
+
+
+def _update_project_threads(sess: _Session, slug: str, proj_name: str, harness: str, tag: str,
+                            now: datetime, open_threads: list[str] | None, threads_c: list[str],
+                            close_c: list[str], mode: str) -> tuple[list[_ThreadItem], list[str], str | None]:
+    tid = f"projects/{slug}/Acik-Konular.md"
+    old_ttext = sess.read(tid)
+    tmeta, tb = parse_markdown(old_ttext)
+    current_items = _parse_threads(tb)
+
+    dedup_threads_c: list[str] = []
+    seen_new: set[str] = set()
+    for t in threads_c:
+        if not t:
+            continue
+        ft = fold_tr(t)
+        if ft not in seen_new:
+            seen_new.add(ft)
+            dedup_threads_c.append(t)
+
+    closed_items: list[_ThreadItem] = []
+    unmatched_close: list[str] = []
+
+    if mode == "replace":
+        explicit_closed: list[_ThreadItem] = []
+        for sel in close_c:
+            if not sel:
+                continue
+            matches = _match_close_selector(current_items, sel)
+            if len(matches) > 1:
+                raise VaultError(
+                    f"close_threads belirsiz ({len(matches)} eşleşme): {sel!r}; tam madde kimliği (t:...) kullanın."
+                )
+            if len(matches) == 1:
+                if matches[0] not in explicit_closed:
+                    explicit_closed.append(matches[0])
+            else:
+                unmatched_close.append(sel)
+        new_keys = {fold_tr(t) for t in dedup_threads_c}
+        final_items: list[_ThreadItem] = []
+        new_used: set[str] = set()
+        for t in dedup_threads_c:
+            nid = _make_thread_id(harness, t, new_used)
+            new_used.add(nid.lower())
+            final_items.append(_ThreadItem(id=nid, owner=harness, text=t))
+        for it in current_items:
+            if fold_tr(it.text) not in new_keys or it in explicit_closed:
+                closed_items.append(it)
+    else:
+        remaining = list(current_items)
+        for sel in close_c:
+            if not sel:
+                continue
+            matches = _match_close_selector(remaining, sel)
+            if len(matches) > 1:
+                raise VaultError(
+                    f"close_threads belirsiz ({len(matches)} eşleşme): {sel!r}; tam madde kimliği (t:...) kullanın."
+                )
+            if len(matches) == 1:
+                m = matches[0]
+                remaining = [it for it in remaining if it is not m]
+                closed_items.append(m)
+            else:
+                unmatched_close.append(sel)
+        if open_threads is not None:
+            others = [it for it in remaining if it.owner != harness]
+            mine = [it for it in remaining if it.owner == harness]
+            new_keys = {fold_tr(t) for t in dedup_threads_c}
+            mine_by_key: dict[str, _ThreadItem] = {}
+            for it in mine:
+                fk = fold_tr(it.text)
+                if fk not in new_keys:
+                    closed_items.append(it)
+                elif fk not in mine_by_key:
+                    mine_by_key[fk] = it
+            others_keys = {fold_tr(it.text) for it in others}
+            used_ids = {it.id.lower() for it in others} | {it.id.lower() for it in mine_by_key.values()}
+            updated_mine: list[_ThreadItem] = []
+            for t in dedup_threads_c:
+                ft = fold_tr(t)
+                if ft in others_keys:
+                    continue
+                if ft in mine_by_key:
+                    old_it = mine_by_key[ft]
+                    updated_mine.append(_ThreadItem(id=old_it.id, owner=harness, text=t))
+                else:
+                    nid = _make_thread_id(harness, t, used_ids)
+                    used_ids.add(nid.lower())
+                    updated_mine.append(_ThreadItem(id=nid, owner=harness, text=t))
+            final_items = others + updated_mine
+        else:
+            final_items = remaining
+
+    arch_id = _archive_closed_threads(sess, slug, closed_items, tag, harness, now) if closed_items else None
+    _touch(tmeta, now)
+    items_str = "\n".join(f"- [ ] {it.text} <!-- t:{it.id} h:{it.owner} -->" for it in final_items) if final_items else "(açık konu yok)"
+    new_ttext = _meta_doc(tmeta, f"# {proj_name} — Açık Konular\n\n{items_str}\n")
+    if new_ttext != old_ttext:
+        sess.write(tid, new_ttext, "threads")
+    return closed_items, unmatched_close, arch_id
+
+
 def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[str] | None = None,
                    refs: list[str] | None = None, session_id: str | None = None,
-                   harness: str = "mcp", state_dir=None) -> dict:
+                   harness: str = "mcp", state_dir=None,
+                   close_threads: list[str] | None = None,
+                   threads_mode: str = "merge") -> dict:
     if not (summary or "").strip():
         raise VaultError("summary boş olamaz.")
+    mode = "merge" if threads_mode is None else threads_mode
+    if mode not in ("merge", "replace"):
+        raise VaultError(f"Geçersiz threads_mode: {threads_mode!r}")
     root = Path(os.path.abspath(str(vault_root)))
     if cwd_or_project and config.get_project(root, str(cwd_or_project)) is not None:
         scope = resolve_scope(root, project=str(cwd_or_project))
@@ -995,14 +1375,27 @@ def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[
     now = _now()
     harness = slugify(harness or "mcp", 20)
     with _Session(ctx, f"{harness}") as sess:
-        vals, cats = _shield_all(sess, [summary] + list(open_threads or []) + list(refs or []))
+        raw_open = list(open_threads or [])
+        raw_refs = list(refs or [])
+        raw_close = list(close_threads or [])
+        vals, cats = _shield_all(sess, [summary] + raw_open + raw_refs + raw_close)
         summary_c = vals[0].strip()
-        n_thr = len(open_threads or [])
-        threads_c = [" ".join(t.split()) for t in vals[1 : 1 + n_thr]]
-        refs_c = [" ".join(r.split()) for r in vals[1 + n_thr :]]
-        if session_id:
-            key = f"{slug}|{harness}|{session_id}"
-            tag = f"{harness}-{slugify(session_id, 24)}"
+        n_thr = len(raw_open)
+        n_ref = len(raw_refs)
+        threads_c = [" ".join(t.split()) for t in vals[1 : 1 + n_thr] if " ".join(t.split())]
+        refs_c = [" ".join(r.split()) for r in vals[1 + n_thr : 1 + n_thr + n_ref]]
+        close_c = [" ".join(c.split()) for c in vals[1 + n_thr + n_ref :]]
+        if session_id and str(session_id).strip():
+            sid_clean = slugify(session_id, 48)
+            while sid_clean.startswith(f"{harness}-"):
+                sid_clean = sid_clean[len(harness) + 1 :]
+            if not sid_clean or sid_clean == harness:
+                tag = harness
+                norm_sid = harness
+            else:
+                norm_sid = sid_clean[:24].rstrip("-")
+                tag = f"{harness}-{norm_sid}"
+            key = f"{slug}|{harness}|{norm_sid}"
         else:
             key = f"{slug}|{harness}|{summary_c}"
             tag = None
@@ -1035,7 +1428,7 @@ def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[
         if not (sess.exists(receipt_id) and sess.read(receipt_id) == new_receipt):
             sess.write(receipt_id, new_receipt, "finish", {"session": tag})
         result = {"status": "recorded", "project": slug, "receipt": receipt_id, "session_tag": tag,
-                  "archived": [], "dlp_categories": cats}
+                  "archived": [], "closed_threads": [], "dlp_categories": cats}
 
         if slug:
             son_id = f"projects/{slug}/Son-Oturum.md"
@@ -1057,21 +1450,163 @@ def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[
             _touch(smeta, now)
             text = _compose_session(smeta, header, cards)
             archived: list[str] = []
-            while len(text) > SESSION_LIMIT and len(cards) > 1:
+            while (
+                len(cards) > SESSION_MAX_CARDS
+                or (len(text) > SESSION_LIMIT and len(cards) > SESSION_MIN_CARDS)
+                or (len(text) > 12000 and len(cards) > 1)
+            ):
                 oldest = cards.pop()
                 archived.append(_archive_card(sess, slug, oldest, now))
                 text = _compose_session(smeta, header, cards)
             old_text = sess.read(son_id)
             if text != old_text:
                 sess.write(son_id, text, "session_card", {"session": tag, "archived": len(archived)})
-            result["archived"] = sorted(set(archived))
 
-            if open_threads is not None:
-                tid = f"projects/{slug}/Acik-Konular.md"
-                tmeta, _tb = parse_markdown(sess.read(tid))
-                _touch(tmeta, now)
-                name = scope["name"] or slug
-                items = "\n".join(f"- [ ] {t}" for t in threads_c) if threads_c else "(açık konu yok)"
-                sess.write(tid, _meta_doc(tmeta, f"# {name} — Açık Konular\n\n{items}\n"), "threads")
+            if open_threads is not None or close_threads is not None:
+                closed_items, unmatched_close, thr_arch = _update_project_threads(
+                    sess, slug, scope["name"] or slug, harness, tag, now,
+                    open_threads, threads_c, close_c, mode,
+                )
+                if thr_arch:
+                    archived.append(thr_arch)
+                result["closed_threads"] = [it.id for it in closed_items]
+                if unmatched_close:
+                    result["unmatched_close"] = unmatched_close
+            result["archived"] = sorted(set(archived))
         sess.sync()
     return result
+
+
+def _parse_receipt_dt(meta: dict, st_mtime: float) -> datetime:
+    for k in ("created_at", "updated_at"):
+        raw = meta.get(k)
+        if raw:
+            try:
+                dt = datetime.fromisoformat(str(raw))
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone().replace(tzinfo=None)
+                return dt
+            except ValueError:
+                pass
+    return datetime.fromtimestamp(st_mtime)
+
+
+def _receipt_short_summary(body: str) -> str:
+    lines: list[str] = []
+    in_threads = False
+    for ln in body.split("\n"):
+        s = ln.strip()
+        if not s or s.startswith("#") or s.startswith("**Proje:**"):
+            continue
+        if s.startswith("**Açık konular:**"):
+            in_threads = True
+            continue
+        if s.startswith("**Kaynaklar:**"):
+            in_threads = False
+            continue
+        if in_threads and s.startswith("- "):
+            continue
+        if s.startswith("- "):
+            s = s[2:].strip()
+        if s:
+            lines.append(s)
+            break
+    flat = " ".join(" ".join(lines).split())
+    if len(flat) > 140:
+        return flat[:137].rstrip() + "..."
+    return flat or "(özet yok)"
+
+
+def compact_receipts(vault_root, older_than_days: int = 14, project: str | None = None,
+                     dry_run: bool = False, state_dir=None) -> dict:
+    ctx = _ctx(vault_root, state_dir)
+    if project is not None and config.get_project(ctx.vault_root, project) is None:
+        raise VaultError(f"Bilinmeyen proje: {project!r}")
+    now = _now()
+    cutoff = now - timedelta(days=int(older_than_days))
+    rdir = ctx.vault_root / "receipts"
+    if not rdir.is_dir():
+        return {"status": "ok", "dry_run": dry_run, "compacted": 0, "summaries": []}
+
+    groups: dict[tuple[str, str], list[dict]] = {}
+    with _Session(ctx, "compact") as sess:
+        for rel, full, st in store.iter_markdown(rdir):
+            doc_id = f"receipts/{rel}"
+            if doc_id.endswith("-ozet.md"):
+                continue
+            text = full.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+            meta, body = parse_markdown(text)
+            if meta.get("compacted_summary"):
+                continue
+            kind = str(meta.get("kind") or "receipt")
+            status = str(meta.get("status") or "active")
+            if kind != "receipt" or status != "active":
+                continue
+            p = meta.get("project")
+            proj_slug = p.strip() if isinstance(p, str) and p.strip() else None
+            if project is not None and proj_slug != project:
+                continue
+            dt = _parse_receipt_dt(meta, st.st_mtime)
+            if dt >= cutoff:
+                continue
+            parts = doc_id.split("/")
+            ym = parts[1] if len(parts) >= 3 and re.match(r"^\d{4}-\d{2}$", parts[1]) else dt.strftime("%Y-%m")
+            gkey = proj_slug or "genel"
+            groups.setdefault((ym, gkey), []).append({
+                "doc_id": doc_id,
+                "meta": dict(meta),
+                "body": body,
+                "dt": dt,
+                "proj_slug": proj_slug,
+            })
+
+        compacted = 0
+        summary_ids: set[str] = set()
+        for (ym, gkey), items in sorted(groups.items()):
+            if len(items) < 2:
+                continue
+            items.sort(key=lambda x: (x["dt"], x["doc_id"]))
+            summary_id = f"receipts/{ym}/{gkey}-ozet.md"
+            grp_proj = items[0]["proj_slug"]
+            if sess.exists(summary_id):
+                smeta, sbody = parse_markdown(sess.read(summary_id))
+                smeta = dict(smeta)
+                _touch(smeta, now)
+            else:
+                smeta = {
+                    "title": f"Makbuz Özeti {ym} ({gkey})",
+                    "kind": "receipt",
+                    "project": grp_proj,
+                    "status": "active",
+                    "compacted_summary": True,
+                    "created_at": _iso(now),
+                    "updated_at": _iso(now),
+                }
+                sbody = f"# Makbuz Özeti {ym} ({gkey})\n"
+            new_bullets: list[str] = []
+            for it in items:
+                doc_id = it["doc_id"]
+                link_ref = f"[[{doc_id[:-3]}]]"
+                if link_ref in sbody:
+                    continue
+                created_date = str(it["meta"].get("created_at") or "")[:10] or it["dt"].strftime("%Y-%m-%d")
+                session = str(it["meta"].get("session") or Path(doc_id).stem)
+                short_sum = _receipt_short_summary(it["body"])
+                new_bullets.append(f"- **{created_date} · {session}** ({link_ref}): {short_sum}")
+            if not dry_run:
+                if new_bullets:
+                    merged_body = sbody.rstrip("\n") + "\n\n" + "\n".join(new_bullets) + "\n"
+                    sess.write(summary_id, _meta_doc(smeta, merged_body), "compact_summary",
+                               {"count": len(new_bullets)})
+                for it in items:
+                    imeta = it["meta"]
+                    imeta["status"] = "archived"
+                    imeta["compacted_into"] = summary_id
+                    _touch(imeta, now)
+                    sess.write(it["doc_id"], _meta_doc(imeta, it["body"]), "compact_receipt",
+                               {"summary": summary_id})
+            compacted += len(items)
+            summary_ids.add(summary_id)
+        if not dry_run and compacted > 0:
+            sess.sync()
+    return {"status": "ok", "dry_run": dry_run, "compacted": compacted, "summaries": sorted(summary_ids)}

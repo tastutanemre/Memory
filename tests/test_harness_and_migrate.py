@@ -38,7 +38,7 @@ class HarnessTests(IsolatedCase):
         data = json.loads((devin / "mcp_config.json").read_text(encoding="utf-8"))
         entry = data["mcpServers"]["mem"]
         self.assertEqual(entry["command"], sys.executable)
-        self.assertEqual(entry["args"], [str(MEM_PY), "mcp", "--profile", "work"])
+        self.assertEqual(entry["args"], [str(MEM_PY), "mcp", "--profile", "work", "--harness", "devin"])
         self.assertTrue(Path(entry["args"][0]).is_file())
         self.assertIn("other", data["mcpServers"])
         self.assertEqual(data["keep"], 1)
@@ -58,7 +58,7 @@ class HarnessTests(IsolatedCase):
         # profil degisince ayni anahtar guncellenir
         harness.connect_harness("devin", "personal", config_root_override=cfg)
         data = json.loads((devin / "mcp_config.json").read_text(encoding="utf-8"))
-        self.assertEqual(data["mcpServers"]["mem"]["args"][-1], "personal")
+        self.assertEqual(data["mcpServers"]["mem"]["args"][1:], ["mcp", "--profile", "personal", "--harness", "devin"])
         self.assertEqual(len(data["mcpServers"]), 2)
 
         # uninstall: yalniz kendi kayitlarini kaldirir
@@ -96,13 +96,14 @@ class HarnessTests(IsolatedCase):
         self.assertIn("# mem-bridge:start", toml)
         harness.connect_harness("claude", "work", config_root_override=cfg)
         claude = json.loads((cfg / ".claude.json").read_text(encoding="utf-8"))
-        self.assertEqual(claude["mcpServers"]["mem"]["args"][1:], ["mcp", "--profile", "work"])
+        self.assertEqual(claude["mcpServers"]["mem"]["args"][1:], ["mcp", "--profile", "work", "--harness", "claude"])
         self.assertTrue((cfg / ".claude" / "CLAUDE.md").exists())
         harness.connect_harness("antigravity", "work", config_root_override=cfg)
         self.assertTrue((cfg / ".gemini" / "config" / "GEMINI.md").exists())
         harness.connect_harness("claude-desktop", "personal", config_root_override=cfg)
         cd = json.loads((cfg / "claude-desktop" / "claude_desktop_config.json").read_text(encoding="utf-8"))
-        self.assertEqual(cd["mcpServers"]["mem"]["args"][1:], ["mcp", "--profile", "personal", "--vault-scope"])
+        self.assertEqual(cd["mcpServers"]["mem"]["args"][1:],
+                         ["mcp", "--profile", "personal", "--harness", "claude-desktop", "--vault-scope"])
 
     def test_invalid_json_left_untouched_and_unknown_harness(self):
         cfg = self.tmp / "r2"
@@ -251,6 +252,48 @@ class MigrateTests(IsolatedCase):
             migrate.import_from_beyin_v3(root, root, state_dir=state)
         with self.assertRaises(FileNotFoundError):
             migrate.import_from_beyin_v3(self.tmp / "yok", root, state_dir=state)
+
+    def test_receipt_with_null_project_infers_from_refs_and_body(self):
+        v3 = self.tmp / "v3receipts"
+        self.write_md(
+            v3,
+            "receipts/r1.md",
+            '---\n{"kind": "receipt", "project": null, "created_at": "2026-11-08T09:00:00+00:00", '
+            '"refs": ["notes/projects/OrderService/Genel-Bakis.md"]}\n---\n'
+            "Sipariş kuyruğu benzersizkelime1 tamamlandı.\n",
+        )
+        self.write_md(
+            v3,
+            "receipts/r2.md",
+            '---\n{"kind": "receipt", "project": "", "created_at": "2026-11-08T10:00:00+00:00", '
+            '"refs": ["notes/projects/OrderService/a.md", "notes/projects/OrderService/b.md", '
+            '"notes/projects/AuthService/c.md"]}\n---\n'
+            "Çoğunluk benzersizkelime2 tamamlandı.\n",
+        )
+        self.write_md(
+            v3,
+            "receipts/r3.md",
+            '---\n{"kind": "receipt", "project": null, "created_at": "2026-11-08T11:00:00+00:00", '
+            '"refs": ["notes/projects/OrderService/a.md", "notes/projects/AuthService/b.md"]}\n---\n'
+            "AuthService: token rotasyonu benzersizkelime3 tamamlandı.\n",
+        )
+        root, state = self.make_vault("personal")
+        vault.register_project(root, "order-service", [self.make_repo("ord")], name="OrderService")
+        vault.register_project(root, "authservice", [self.make_repo("auth")], name="AuthService")
+        res = migrate.import_from_beyin_v3(v3, root, state_dir=state)
+        self.assertEqual(len(res["imported"]), 3)
+
+        m1, _ = parse_markdown((root / "receipts/2026-11/r1.md").read_text(encoding="utf-8"))
+        m2, _ = parse_markdown((root / "receipts/2026-11/r2.md").read_text(encoding="utf-8"))
+        m3, _ = parse_markdown((root / "receipts/2026-11/r3.md").read_text(encoding="utf-8"))
+        self.assertEqual(m1["project"], "order-service")
+        self.assertEqual(m2["project"], "order-service")
+        self.assertEqual(m3["project"], "authservice")
+
+        # authservice aramasinda order-service makbuzu sizmaz
+        auth_hits = [h["doc_id"] for h in vault.search_memory(root, "benzersizkelime1",
+                                                               project="authservice", state_dir=state)]
+        self.assertEqual(auth_hits, [])
 
 
 if __name__ == "__main__":

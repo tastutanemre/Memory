@@ -222,6 +222,70 @@ class McpInProcessTests(IsolatedCase):
         res = self.server.call_tool("memory_read", {"path": "projects/other/Kurallar.md", "cwd": str(self.repo)})
         self.assertTrue(res["isError"])
 
+    def test_configured_default_harness_enforced_and_close_threads_exposed(self):
+        srv_claude = McpServer(self.root, self.state, default_cwd=str(self.repo), default_harness="claude")
+        srv_ag = McpServer(self.root, self.state, default_cwd=str(self.repo), default_harness="antigravity")
+        # Agent tries to spoof harness="antigravity" while server was launched with --harness claude
+        r1 = srv_claude.call_tool("memory_finish", {
+            "cwd": str(self.repo),
+            "summary": "Claude oturumu",
+            "open_threads": ["Claude işi"],
+            "session_id": "s1",
+            "harness": "antigravity",
+        })
+        self.assertNotIn("isError", r1)
+        d1 = json.loads(text_of(r1))
+        self.assertEqual(d1["session_tag"], "claude-s1")
+
+        r2 = srv_ag.call_tool("memory_finish", {
+            "cwd": str(self.repo),
+            "summary": "AG oturumu",
+            "open_threads": ["AG işi"],
+            "session_id": "s1",
+        })
+        d2 = json.loads(text_of(r2))
+        self.assertEqual(d2["session_tag"], "antigravity-s1")
+        ttext = (self.root / "projects/svc/Acik-Konular.md").read_text(encoding="utf-8")
+        self.assertIn("Claude işi", ttext)
+        self.assertIn("h:claude", ttext)
+        self.assertIn("AG işi", ttext)
+        self.assertIn("h:antigravity", ttext)
+
+        # Cross-agent close via MCP tool
+        r3 = srv_ag.call_tool("memory_finish", {
+            "cwd": str(self.repo),
+            "summary": "Claude işi kapatıldı",
+            "close_threads": ["Claude işi"],
+            "session_id": "s2",
+        })
+        self.assertNotIn("isError", r3)
+        d3 = json.loads(text_of(r3))
+        self.assertEqual(len(d3["closed_threads"]), 1)
+        ttext = (self.root / "projects/svc/Acik-Konular.md").read_text(encoding="utf-8")
+        self.assertNotIn("Claude işi", ttext)
+        self.assertIn("AG işi", ttext)
+
+    def test_memory_rule_tags_supersedes_and_remove_preserves_required_schema(self):
+        from mem.mcp_server import TOOLS
+        rule_tool = next(t for t in TOOLS if t["name"] == "memory_rule")
+        self.assertEqual(rule_tool["inputSchema"]["required"], ["rule"])
+        r1 = json.loads(text_of(self.server.call_tool("memory_rule", {
+            "cwd": str(self.repo), "scope": "global", "rule": "Eski MCP kuralı", "tags": ["Python"],
+        })))
+        self.assertEqual(r1["status"], "added")
+        self.assertIn("{tags: python}", r1["line"])
+        r2 = json.loads(text_of(self.server.call_tool("memory_rule", {
+            "cwd": str(self.repo), "scope": "global", "rule": "Yeni MCP kuralı",
+            "supersedes": "Eski MCP kuralı", "tags": ["python"],
+        })))
+        self.assertEqual(r2["status"], "added")
+        self.assertIn("Eski MCP kuralı", r2["superseded_line"])
+        r3 = json.loads(text_of(self.server.call_tool("memory_rule", {
+            "cwd": str(self.repo), "scope": "global", "rule": "Yeni MCP kuralı", "remove": True,
+        })))
+        self.assertEqual(r3["status"], "removed")
+        self.assertNotIn("Yeni MCP kuralı", (self.root / "Kurallar.md").read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

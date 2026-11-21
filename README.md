@@ -56,9 +56,11 @@ python3 mem.py init --profile personal --vault ~/Notes/MemoryVault
 Hafızanın devreye girmesini istediğiniz yazılım projelerini beyaz listeye ekleyin:
 
 ```bash
-python mem.py project add backend-api --root /yol/backend-api --name "Backend API"
+python mem.py project add backend-api --root /yol/backend-api --name "Backend API" --tag python --tag fastapi
 python mem.py project list
 ```
+
+(`--tag` ile verdiğiniz proje etiketleri, `Kurallar.md` içindeki `{tags: ...}` etiketli genel kuralların yalnızca ilgili projelere yüklenmesini sağlar.)
 
 ### 4. Kullandığınız Yapay Zekâ Araçlarına Bağlayın
 
@@ -96,7 +98,7 @@ python mem.py doctor --profile personal
 
 ## Desteklenen Araçlar ve Yapılandırma Dosyaları
 
-`mem.py connect <hedef>` komutu herhangi bir gizli kabuk betiği veya arka plan servisi kurmaz; yalnızca ilgili aracın standart MCP ve kural dosyasına şeffaf bir kayıt ekler:
+`mem.py connect <hedef>` komutu herhangi bir gizli kabuk betiği veya arka plan servisi kurmaz; yalnızca ilgili aracın standart MCP ve kural dosyasına şeffaf bir kayıt ekler (her bağlantı kaydına güvenilir istemci kimliği için `--harness <hedef>` argümanı otomatik eklenir):
 
 | Hedef (`harness`) | MCP Yapılandırması | Global Kural Bloğu | Not |
 |---|---|---|---|
@@ -116,13 +118,13 @@ Bağlantı kurulduğunda yapay zekâ ajanınız şu MCP araçlarını doğrudan 
 
 | MCP Aracı | Görevi |
 |---|---|
-| `memory_bootstrap` | Oturum başında çağrılır; `Core.md`, genel/proje kuralları, açık konular ve son oturum devir kartını getirir (`budget_chars` varsayılan `8000`). |
+| `memory_bootstrap` | Oturum başında çağrılır; `Core.md`, genel/proje kuralları (etikete göre filtrelenmiş), açık konular (taban bütçe korumalı) ve son oturum devir kartını getirir (`budget_chars` varsayılan `8000`). |
 | `memory_search` | Türkçe kök/ek duyarlı FTS5 BM25 + `[[WikiLink]]` komşuluk grafı ile hafızada arama yapar. |
 | `memory_read` | Belirtilen notu ve iyimser kilitleme için güncel `sha256` özetini okur. |
 | `memory_decide` | Mimari/ürün kararlarını standart ADR formatında kaydeder (`shared=true` ile ortak bilgiye yazar); mükerrer/çelişkili kararlarda `duplicate_warning` veya `advisor_warning` döndürür, `supersedes` ile eski kararları geçersiz kılar. |
-| `memory_rule` | Kullanıcı düzeltmelerinden çıkan kalıcı kuralları (`scope='global'` veya proje kapsamlı) ekler. |
+| `memory_rule` | Kullanıcı düzeltmelerinden çıkan kalıcı kuralları (`scope='global'` veya proje kapsamlı, isteğe bağlı `tags`, `supersedes`, `remove=true`) ekler, günceller veya arşive kaldırır. |
 | `memory_patch` | Mevcut bir notu `expected_sha256` doğrulaması ve `edits` listesiyle güvenli biçimde günceller. |
-| `memory_finish` | Oturum sonunda iş makbuzu oluşturur, `Son-Oturum.md` devir kartını ve `Acik-Konular.md` listesini günceller. |
+| `memory_finish` | Oturum sonunda iş makbuzu oluşturur, `Son-Oturum.md` devir kartını ve `Acik-Konular.md` listesini günceller (`open_threads` ajan sahipliğine göre birleştirilir; `close_threads` ajanlar arası madde kapatır). |
 
 **Hazır MCP Prompt'ları:** `start` (oturumu bağlamla başlat), `decide` (kararı ADR olarak kaydet), `wrapup` (oturum devir özeti yaz).
 
@@ -136,14 +138,18 @@ MCP dışında doğrudan terminalden de tüm işlemler yapılabilir (`--json` ba
 python mem.py bootstrap --task "kimlik doğrulama" --budget 8000
 python mem.py decide --title "Önbellek katmanı" --decision "Okuma yoğun uçlarda Redis kullanılacak" --rationale "Düşük gecikme"
 python mem.py decide --shared --title "API sürümleme" --decision "Tüm servisler /v1/ öneki kullanır"
-python mem.py rule "Her veritabanı şema değişikliği geri alınabilir migrasyon içermeli" --reason "Canlı güvenlik" --scope global
+python mem.py rule "Her veritabanı şema değişikliği geri alınabilir migrasyon içermeli" --reason "Canlı güvenlik" --scope global --tag python
+python mem.py rule "Tüm API uçları şema doğrulaması kullanmalı" --supersedes "Her veritabanı şema değişikliği geri alınabilir migrasyon içermeli"
+python mem.py rule "Eski geçici kural" --remove
 python mem.py search "önbellek kararları" --limit 10 --include-superseded
 python mem.py read projects/backend-api/Backend-API.md
 python mem.py patch projects/backend-api/Acik-Konular.md --sha256 <mevcut_sha256> --old "- [ ] Eski madde" --new "- [x] Tamamlandı"
-python mem.py finish --summary "OAuth2 akışı tamamlandı" --thread "Yenileme token rotasyonu eklenecek"
+python mem.py finish --summary "OAuth2 akışı tamamlandı" --thread "Yenileme token rotasyonu eklenecek" --close-thread t:a1b2c3 --session s1
+python mem.py compact --days 14 --dry-run
 python mem.py sync
 python mem.py profiles
 python mem.py doctor
+python mem.py mcp --profile personal --harness claude
 ```
 
 **Çıkış Kodları:** `0` başarılı · `1` doctor hatası · `2` kullanım/doğrulama hatası · `3` DLP engeli · `4` `sha256` çakışması · `5` kayıtsız çalışma alanı.

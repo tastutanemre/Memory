@@ -203,7 +203,8 @@ class Blocker4HarnessPathTests(IsolatedCase):
         paths = {Path(f["path"]).relative_to(cfg).as_posix() for f in res["files"]}
         self.assertEqual(paths, {".gemini/config/mcp_config.json", ".gemini/config/GEMINI.md"})
         data = json.loads((cfg / ".gemini/config/mcp_config.json").read_text(encoding="utf-8"))
-        self.assertEqual(data["mcpServers"]["mem"]["args"][1:], ["mcp", "--profile", "work"])
+        self.assertEqual(data["mcpServers"]["mem"]["args"][1:],
+                         ["mcp", "--profile", "work", "--harness", "antigravity"])
         self.assertFalse((cfg / ".gemini" / "antigravity").exists())
 
 

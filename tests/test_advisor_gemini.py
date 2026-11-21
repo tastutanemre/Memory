@@ -533,6 +533,81 @@ class DecisionAdvisorTests(AdvisorBase):
             vault.bootstrap_context(root, state, task_hint="redis", reranker=SpyExternal())
             self.assertEqual(calls, [])
 
+    def test_record_decision_does_not_hold_vault_lock_during_advisor_call(self):
+        import threading
+        entered = threading.Event()
+        release = threading.Event()
+        concurrent_rule_done = threading.Event()
+        errors: list[Exception] = []
+
+        class BlockingAdvisor:
+            def assess_decision(self, proposal, priors):
+                entered.set()
+                release.wait(timeout=5.0)
+                return None
+
+        def run_decide():
+            try:
+                self.decide(BlockingAdvisor(), title="Kilitsiz danışman", decision="Karar kilidi bloklamaz")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t = threading.Thread(target=run_decide)
+        t.start()
+        self.assertTrue(entered.wait(timeout=5.0))
+        try:
+            # Advisor beklenirken baska bir islem VaultLock alip kural yazabilmeli (timeout 0.5s ile hizli fail)
+            from mem.lock import VaultLock
+            with VaultLock(self.state / "writer.lock", timeout=0.5):
+                pass
+            vault.add_rule(self.root, "global", "Eşzamanlı kural kilitsiz yazılır", state_dir=self.state)
+            concurrent_rule_done.set()
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            release.set()
+        t.join(timeout=5.0)
+        self.assertEqual(errors, [])
+        self.assertTrue(concurrent_rule_done.is_set())
+
+    def test_concurrent_double_supersede_rejected_after_unlocked_advisor(self):
+        import threading
+        base = self.decide(None, title="İlk kuyruk kararı", decision="RabbitMQ seç")
+        entered = threading.Event()
+        release = threading.Event()
+        results: list = []
+
+        class BlockingAdvisor:
+            def assess_decision(self, proposal, priors):
+                entered.set()
+                release.wait(timeout=5.0)
+                return None
+
+        def slow_supersede():
+            try:
+                r = self.decide(BlockingAdvisor(), title="Kafka geçişi", decision="Kafka seç",
+                                supersedes=[base["path"]])
+                results.append(r)
+            except Exception as exc:  # noqa: BLE001
+                results.append(exc)
+
+        t = threading.Thread(target=slow_supersede)
+        t.start()
+        self.assertTrue(entered.wait(timeout=5.0))
+        try:
+            # Danisman penceresinde baska bir ajan ayni karari daha once supersede ediyor
+            winner = self.decide(None, title="NATS geçişi", decision="NATS seç", supersedes=[base["path"]])
+            self.assertEqual(winner["status"], "created")
+        finally:
+            release.set()
+        t.join(timeout=5.0)
+        self.assertEqual(len(results), 1)
+        self.assertIsInstance(results[0], vault.VaultError)
+        # Ilk supersede eden karar ezilmedi
+        from mem.frontmatter import parse_markdown
+        ometa, _ = parse_markdown((self.root / base["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(ometa["superseded_by"], winner["path"])
+
 
 class CliMcpHarnessTests(AdvisorBase):
     def test_cli_advisor_subcommands(self):

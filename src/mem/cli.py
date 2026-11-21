@@ -77,7 +77,7 @@ def cmd_project_add(args) -> int:
     root, sd = _vault_ctx(args)
     roots = args.root or [os.getcwd()]
     res = vault.register_project(root, args.slug, roots, name=args.name, description=args.description or "",
-                                 state_dir=sd)
+                                 state_dir=sd, tags=args.tag)
     _out(args, res, f"Proje {res['status']}: {res['slug']} ({res['name']})\nKökler: {', '.join(res['roots'])}")
     return EXIT_OK
 
@@ -121,8 +121,12 @@ def cmd_rule(args) -> int:
     rscope = args.scope or scope["project"] or "global"
     if scope["scope"] == "project" and rscope not in ("global", scope["project"]):
         raise vault.VaultError(f"Bu çalışma alanı '{scope['project']}' projesine ait; '{rscope}' kapsamına yazılamaz.")
-    res = vault.add_rule(root, rscope, args.rule, args.reason or "", state_dir=sd, actor="cli")
-    _out(args, res, f"Kural {res['status']}: {res['path']}\n{res['line']}")
+    res = vault.add_rule(root, rscope, args.rule, args.reason or "", state_dir=sd, actor="cli",
+                         tags=args.tag, supersedes=args.supersedes, remove=args.remove)
+    if res["status"] == "removed":
+        _out(args, res, f"Kural kaldırıldı: {res['path']}\n{res['removed_line']}")
+    else:
+        _out(args, res, f"Kural {res['status']}: {res['path']}\n{res['line']}")
     return EXIT_OK
 
 
@@ -171,9 +175,19 @@ def cmd_finish(args) -> int:
         return _unregistered(args, scope)
     target = scope["project"] or str(root)
     res = vault.finish_session(root, target, args.summary, open_threads=args.thread, refs=args.ref,
-                               session_id=args.session, harness=args.harness, state_dir=sd)
+                               session_id=args.session, harness=args.harness, state_dir=sd,
+                               close_threads=args.close_thread, threads_mode=args.threads_mode)
     _out(args, res, f"Makbuz: {res['receipt']}\nOturum: {res['session_tag']}"
                     + (f"\nArşive taşındı: {', '.join(res['archived'])}" if res["archived"] else ""))
+    return EXIT_OK
+
+
+def cmd_compact(args) -> int:
+    root, sd = _vault_ctx(args)
+    res = vault.compact_receipts(root, older_than_days=args.days, project=args.project,
+                                 dry_run=args.dry_run, state_dir=sd)
+    _out(args, res, f"Sıkıştırılan makbuz: {res['compacted']}"
+                    + (f"\nÖzetler: {', '.join(res['summaries'])}" if res["summaries"] else ""))
     return EXIT_OK
 
 
@@ -217,7 +231,7 @@ def cmd_import_v3(args) -> int:
 def cmd_mcp(args) -> int:
     from .mcp_server import main_for_profile
     return main_for_profile(args.profile, vault_root=args.vault, vault_scope=args.vault_scope,
-                            advisor_mode=args.advisor)
+                            advisor_mode=args.advisor, default_harness=args.harness)
 
 
 def cmd_profiles(args) -> int:
@@ -320,6 +334,12 @@ def cmd_doctor(args) -> int:
         for r in proj.get("roots", []):
             if not Path(r).exists():
                 add("WARN", f"Proje kökü bulunamadı ({proj['slug']})", r)
+    core_len = len((root / "Core.md").read_text(encoding="utf-8")) if (root / "Core.md").is_file() else 0
+    rules_len = len((root / "Kurallar.md").read_text(encoding="utf-8")) if (root / "Kurallar.md").is_file() else 0
+    total_rule_chars = core_len + rules_len
+    pct = round(total_rule_chars * 100 / 8000)
+    add("WARN" if total_rule_chars >= 6000 else "PASS", "Bootstrap kural bütçesi",
+        f"Core+Kurallar={total_rule_chars} kr (%{pct} / 8000)")
     return _doctor_report(args, checks)
 
 
@@ -365,6 +385,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--root", action="append", help="repo kökü (tekrarlanabilir; varsayılan: geçerli dizin)")
     s.add_argument("--name")
     s.add_argument("--description")
+    s.add_argument("--tag", action="append", help="proje etiketi (kural filtreleme için, ör. python, android)")
     s.set_defaults(func=cmd_project_add)
     s = psub.add_parser("list", parents=[common], help="kayıtlı projeler")
     s.set_defaults(func=cmd_project_list)
@@ -382,10 +403,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--shared", action="store_true", help="karar projeye değil knowledge/kararlar/ altına yazılır")
     s.set_defaults(func=cmd_decide)
 
-    s = sub.add_parser("rule", parents=[common, scoped], help="kural ekle")
+    s = sub.add_parser("rule", parents=[common, scoped], help="kural ekle, güncelle veya kaldır")
     s.add_argument("rule")
     s.add_argument("--reason")
     s.add_argument("--scope", help="'global' veya proje slug'ı")
+    s.add_argument("--tag", action="append", help="kural etiketi (tekrarlanabilir; genel kuralları projeye göre filtreler)")
+    s.add_argument("--supersedes", help="yerine geçilecek mevcut kural metni (arşive taşınır)")
+    s.add_argument("--remove", action="store_true", help="verilen rule metniyle eşleşen mevcut kuralı kaldırıp arşive taşır")
     s.set_defaults(func=cmd_rule)
 
     s = sub.add_parser("search", parents=[common, scoped, advisor_opt], help="hafızada ara")
@@ -407,6 +431,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("finish", parents=[common, scoped], help="oturumu bitir (makbuz + devir kartı)")
     s.add_argument("--summary", required=True)
     s.add_argument("--thread", action="append", help="açık konu (tekrarlanabilir)")
+    s.add_argument("--close-thread", action="append", help="kapatılacak açık konu kimliği veya tam metni")
+    s.add_argument("--threads-mode", choices=("merge", "replace"), default="merge",
+                   help="açık konular güncelleme modu (varsayılan: merge)")
     s.add_argument("--ref", action="append")
     s.add_argument("--session")
     s.add_argument("--harness", default="cli")
@@ -421,6 +448,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("sync", parents=[common], help="indeksi eşitle")
     s.set_defaults(func=cmd_sync)
+
+    s = sub.add_parser("compact", parents=[common], help="eski oturum makbuzlarını aylık özet notunda sıkıştır")
+    s.add_argument("--days", type=int, default=14, help="bu günden eski makbuzları sıkıştır (varsayılan: 14)")
+    s.add_argument("--project", help="yalnız belirtilen proje slug'ı için sıkıştır")
+    s.add_argument("--dry-run", action="store_true", help="değişiklik yazmadan önizle")
+    s.set_defaults(func=cmd_compact)
 
     s = sub.add_parser("doctor", parents=[common], help="kurulum sağlık denetimi")
     s.set_defaults(func=cmd_doctor)
@@ -454,6 +487,7 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(func=cmd_advisor)
 
     s = sub.add_parser("mcp", parents=[common, advisor_opt], help="MCP stdio sunucusu")
+    s.add_argument("--harness", help="bağlı istemci kimliği (connect tarafından atanır)")
     s.add_argument("--vault-scope", action="store_true",
                    help="masaüstü sohbet istemcileri (ör. Claude Desktop) için varsayılan kapsamı kasa kökü yap")
     s.set_defaults(func=cmd_mcp)

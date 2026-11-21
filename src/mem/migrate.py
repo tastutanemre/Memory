@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import Counter
 from pathlib import Path
 
 from . import config, dlp, store
@@ -264,6 +265,12 @@ def import_from_beyin_v3(source_vault, target_vault, dry_run: bool = False, stat
                 slug = target.split("/")[1]
                 projects_seen.add(slug)
                 meta["project"] = slug
+            else:
+                raw_proj = meta.get("project")
+                if isinstance(raw_proj, str) and raw_proj.strip():
+                    meta["project"] = _slug_for(raw_proj.strip(), projects)
+                else:
+                    meta.pop("project", None)
             if meta["kind"] == "decision":
                 if "decision_date" in meta and "date" not in meta:
                     meta["date"] = meta.pop("decision_date")
@@ -279,16 +286,33 @@ def import_from_beyin_v3(source_vault, target_vault, dry_run: bool = False, stat
                 meta["supersedes"] = mapped_sup
             if isinstance(meta.get("refs"), list):
                 mapped_refs = []
-                ref_projects: set[str] = set()
+                ref_counts: Counter[str] = Counter()
                 for item in meta["refs"]:
                     s = str(item).strip()
                     mr = _map_target(s if s.endswith(".md") else f"{s}.md", projects, receipt_map) or s
                     mapped_refs.append(mr)
                     if mr.startswith("projects/") and len(mr.split("/")) >= 2:
-                        ref_projects.add(mr.split("/")[1])
+                        ref_counts[mr.split("/")[1]] += 1
                 meta["refs"] = mapped_refs
-                if meta["kind"] == "receipt" and len(ref_projects) == 1 and "project" not in meta:
-                    meta["project"] = next(iter(ref_projects))
+                if meta["kind"] == "receipt" and not meta.get("project"):
+                    if len(ref_counts) == 1:
+                        meta["project"] = next(iter(ref_counts))
+                    elif len(ref_counts) > 1:
+                        head = _norm(body.strip()[:80])
+                        head_matches: list[str] = []
+                        for c_slug in ref_counts:
+                            proj_entry = next((p for p in projects if p["slug"] == c_slug), None)
+                            probes = [_norm(c_slug)]
+                            if proj_entry and proj_entry.get("name"):
+                                probes.append(_norm(proj_entry["name"]))
+                            if any(pr and pr in head for pr in probes):
+                                head_matches.append(c_slug)
+                        if len(head_matches) == 1:
+                            meta["project"] = head_matches[0]
+                        else:
+                            top2 = ref_counts.most_common(2)
+                            if len(top2) >= 2 and top2[0][1] > top2[1][1]:
+                                meta["project"] = top2[0][0]
             meta.setdefault("title", Path(target).stem)
             meta["imported_from"] = "beyin_v3"
             meta.setdefault("imported_at", now)

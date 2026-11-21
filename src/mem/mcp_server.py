@@ -62,8 +62,11 @@ TOOLS = [
     },
     {
         "name": "memory_rule",
-        "description": "Kullanıcı düzeltmesinden çıkan kalıcı kuralı ekler (scope=global veya proje).",
+        "description": "Kullanıcı düzeltmesinden çıkan kalıcı kuralı ekler (scope=global veya proje); supersedes/remove ile günceller veya kaldırır.",
         "inputSchema": _obj({"rule": _STR, "reason": _STR, "scope": {"type": "string", "description": "'global' veya proje slug'ı"},
+                             "tags": _STR_LIST,
+                             "supersedes": {"type": "string", "description": "yerine geçilecek mevcut kural metni (arşive taşınır)"},
+                             "remove": {"type": "boolean", "description": "true ise verilen rule metniyle eşleşen mevcut kuralı kaldırıp arşive taşır"},
                              **_SCOPE_PROPS}, ["rule"]),
     },
     {
@@ -76,8 +79,10 @@ TOOLS = [
     {
         "name": "memory_finish",
         "description": "Anlamlı iş bitince çağır: iş makbuzu yazar, Son-Oturum kartını ve (verilirse) açık konuları günceller.",
-        "inputSchema": _obj({"summary": _STR, "open_threads": _STR_LIST, "refs": _STR_LIST, "session_id": _STR,
-                             "harness": _STR, **_SCOPE_PROPS}, ["summary"]),
+        "inputSchema": _obj({"summary": _STR, "open_threads": _STR_LIST, "close_threads": _STR_LIST,
+                             "threads_mode": {"type": "string", "enum": ["merge", "replace"]},
+                             "refs": _STR_LIST, "session_id": _STR, "harness": _STR, **_SCOPE_PROPS},
+                            ["summary"]),
     },
 ]
 
@@ -117,11 +122,13 @@ _UNSET = object()
 
 class McpServer:
     def __init__(self, vault_root, state_dir=None, default_cwd: str | None = None,
-                 vault_scope: bool = False, advisor_mode: str | None = None):
+                 vault_scope: bool = False, advisor_mode: str | None = None,
+                 default_harness: str | None = None):
         self.vault_root = Path(vault_root)
         self.state_dir = state_dir
         self.vault_scope = vault_scope
         self._advisor_mode = advisor_mode
+        self.default_harness = default_harness
         self._reranker_override: object = _UNSET
         self._advisor_override: object = _UNSET
         # Acilista dogrula: work/block profilde acik advisor="gemini" aninda ValueError verir.
@@ -214,11 +221,25 @@ class McpServer:
         sd = self.state_dir
         vr = self.vault_root
         for key in ("context", "alternatives", "rationale", "reason", "task_hint", "session_id", "harness",
-                    "scope", "query", "path", "expected_sha256", "title", "decision", "rule", "summary"):
+                    "threads_mode", "scope", "query", "path", "expected_sha256", "title", "decision",
+                    "rule", "summary"):
             if a.get(key) is not None and not isinstance(a[key], str):
                 raise ValueError(f"{key} string olmalı")
-        for key in ("supersedes", "sources", "tags", "open_threads", "refs"):
+        for key in ("sources", "tags", "open_threads", "close_threads", "refs"):
             _check_str_list(a, key)
+        if name == "memory_decide":
+            _check_str_list(a, "supersedes")
+        elif name == "memory_rule":
+            if a.get("supersedes") is not None and not isinstance(a["supersedes"], str):
+                raise ValueError("supersedes string olmalı")
+            if a.get("remove") is not None and not isinstance(a["remove"], bool):
+                raise ValueError("remove boolean olmalı")
+        configured_harness = (
+            vault.slugify(self.default_harness, 20)
+            if self.default_harness and self.default_harness.strip()
+            else None
+        )
+        actor = configured_harness or "mcp"
         if name == "memory_bootstrap":
             scope = self._scope(a)
             if a.get("cwd"):  # oturum calisma alanini hatirla / kayitsiz repoya gecilince sifirla
@@ -250,23 +271,28 @@ class McpServer:
                 vr, None if shared else slug, _req(a, "title"), _req(a, "decision"), context=a.get("context") or "",
                 alternatives=a.get("alternatives") or "", rationale=a.get("rationale") or "",
                 supersedes=a.get("supersedes"), sources=a.get("sources"), tags=a.get("tags"),
-                force=bool(a.get("force")), state_dir=sd, actor="mcp", advisor=self.advisor))
+                force=bool(a.get("force")), state_dir=sd, actor=actor, advisor=self.advisor))
         if name == "memory_rule":
             rscope = a.get("scope") or slug or "global"
             if scope["scope"] == "project" and rscope not in ("global", slug):
                 raise ValueError(f"Bu çalışma alanı '{slug}' projesine ait; '{rscope}' kapsamına kural yazılamaz.")
-            return _text(vault.add_rule(vr, rscope, _req(a, "rule"), a.get("reason") or "", state_dir=sd, actor="mcp"))
+            return _text(vault.add_rule(
+                vr, rscope, _req(a, "rule"), a.get("reason") or "", state_dir=sd, actor=actor,
+                tags=a.get("tags"), supersedes=a.get("supersedes"), remove=bool(a.get("remove")),
+            ))
         if name == "memory_patch":
             edits = a.get("edits")
             if not isinstance(edits, list):
                 raise ValueError("edits bir liste olmalı")
             return _text(vault.patch_note(vr, _req(a, "path"), _req(a, "expected_sha256"), edits,
-                                          state_dir=sd, project=slug, actor="mcp"))
+                                          state_dir=sd, project=slug, actor=actor))
         if name == "memory_finish":
             target = slug if slug else str(vr)
+            effective_harness = configured_harness or a.get("harness") or "mcp"
             return _text(vault.finish_session(
                 vr, target, _req(a, "summary"), open_threads=a.get("open_threads"), refs=a.get("refs"),
-                session_id=a.get("session_id"), harness=a.get("harness") or "mcp", state_dir=sd))
+                session_id=a.get("session_id"), harness=effective_harness, state_dir=sd,
+                close_threads=a.get("close_threads"), threads_mode=a.get("threads_mode") or "merge"))
         raise KeyError(name)
 
     # --- JSON-RPC
@@ -462,10 +488,12 @@ def serve(server: McpServer, inp, out) -> None:
             _write_message(out, reply, mode)
 
 
-def run_stdio(vault_root, state_dir=None, vault_scope: bool = False, advisor_mode: str | None = None) -> int:
+def run_stdio(vault_root, state_dir=None, vault_scope: bool = False, advisor_mode: str | None = None,
+              default_harness: str | None = None) -> int:
     """Gercek stdio: stdout ikili ve yalniz protokol; sapan print'ler stderr'e yonlendirilir."""
     # Sunucu once kurulur: gecersiz advisor istegi (ör. work + gemini) akislara dokunmadan ValueError verir.
-    server = McpServer(vault_root, state_dir, vault_scope=vault_scope, advisor_mode=advisor_mode)
+    server = McpServer(vault_root, state_dir, vault_scope=vault_scope, advisor_mode=advisor_mode,
+                       default_harness=default_harness)
     out = sys.stdout.buffer
     inp = sys.stdin.buffer
     sys.stdout = sys.stderr
@@ -477,11 +505,13 @@ def run_stdio(vault_root, state_dir=None, vault_scope: bool = False, advisor_mod
 
 
 def main_for_profile(profile_name: str | None = None, vault_root=None, state_dir=None,
-                     vault_scope: bool = False, advisor_mode: str | None = None) -> int:
+                     vault_scope: bool = False, advisor_mode: str | None = None,
+                     default_harness: str | None = None) -> int:
     if vault_root:
         root = Path(vault_root)
         sdir = config.resolve_state_dir(root, state_dir)
     else:
         prof = config.get_profile(profile_name)
         root, sdir = Path(prof.vault_root), Path(prof.state_dir)
-    return run_stdio(root, sdir, vault_scope=vault_scope, advisor_mode=advisor_mode)
+    return run_stdio(root, sdir, vault_scope=vault_scope, advisor_mode=advisor_mode,
+                     default_harness=default_harness)
