@@ -12,6 +12,7 @@ from pathlib import Path
 
 from . import __version__, config, harness, migrate, store, vault
 from .dlp import DLPBlockedError
+from .frontmatter import parse_markdown
 from .lock import ConcurrencyConflictError, PathTraversalError, VaultLock
 
 EXIT_OK, EXIT_ERROR, EXIT_USAGE, EXIT_DLP, EXIT_CONFLICT, EXIT_UNREGISTERED = 0, 1, 2, 3, 4, 5
@@ -334,12 +335,54 @@ def cmd_doctor(args) -> int:
         for r in proj.get("roots", []):
             if not Path(r).exists():
                 add("WARN", f"Proje kökü bulunamadı ({proj['slug']})", r)
-    core_len = len((root / "Core.md").read_text(encoding="utf-8")) if (root / "Core.md").is_file() else 0
-    rules_len = len((root / "Kurallar.md").read_text(encoding="utf-8")) if (root / "Kurallar.md").is_file() else 0
-    total_rule_chars = core_len + rules_len
-    pct = round(total_rule_chars * 100 / 8000)
-    add("WARN" if total_rule_chars >= 6000 else "PASS", "Bootstrap kural bütçesi",
-        f"Core+Kurallar={total_rule_chars} kr (%{pct} / 8000)")
+    def _read_doctor_rule(rel: str) -> str | None:
+        p = root / rel
+        if not p.exists() and not p.is_symlink():
+            return None
+        try:
+            return parse_markdown(p.read_text(encoding="utf-8"))[1].strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            add("FAIL", f"Kural dosyası okunamadı ({rel})", str(exc))
+            return None
+
+    core_body = _read_doctor_rule("Core.md") or ""
+    grules_body = _read_doctor_rule("Kurallar.md") or ""
+    if projects:
+        max_len = 0
+        over: list[str] = []
+        for proj in projects:
+            slug = proj["slug"]
+            pname = proj.get("name", slug)
+            filtered_global = vault._filter_global_rules(grules_body, root, slug)
+            prules = _read_doctor_rule(f"projects/{slug}/Kurallar.md")
+            mandatory = [f"# Hafıza bağlamı — {pname} ({slug})"]
+            if core_body:
+                mandatory.append("## Core\n\n" + core_body)
+            if filtered_global:
+                mandatory.append("## Genel kurallar\n\n" + filtered_global)
+            if prules is not None:
+                mandatory.append(f"## Proje kuralları ({slug})\n\n" + (prules or "(kural yok)"))
+            mlen = len("\n\n".join(mandatory))
+            if mlen > max_len:
+                max_len = mlen
+            if mlen >= 6000:
+                over.append(f"{slug} ({mlen} kr{', >8000 bütçe aşımı' if mlen > 8000 else ''})")
+        pct = round(max_len * 100 / 8000)
+        if over:
+            add("WARN", "Bootstrap kural bütçesi",
+                f"en yüksek={max_len} kr (%{pct} / 8000); aşan projeler: {', '.join(over)}")
+        else:
+            add("PASS", "Bootstrap kural bütçesi", f"en yüksek={max_len} kr (%{pct} / 8000)")
+    else:
+        mandatory = ["# Hafıza bağlamı — genel"]
+        if core_body:
+            mandatory.append("## Core\n\n" + core_body)
+        if grules_body:
+            mandatory.append("## Genel kurallar\n\n" + grules_body)
+        max_len = len("\n\n".join(mandatory))
+        pct = round(max_len * 100 / 8000)
+        detail = f"en yüksek={max_len} kr (%{pct} / 8000)" + (" (>8000 bütçe aşımı)" if max_len > 8000 else "")
+        add("WARN" if max_len >= 6000 else "PASS", "Bootstrap kural bütçesi", detail)
     return _doctor_report(args, checks)
 
 

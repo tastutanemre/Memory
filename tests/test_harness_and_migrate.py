@@ -295,6 +295,36 @@ class MigrateTests(IsolatedCase):
                                                                project="authservice", state_dir=state)]
         self.assertEqual(auth_hits, [])
 
+    def test_slug_for_exact_match_precedence_over_normalized(self):
+        v3 = self.tmp / "v3slugs"
+        self.write_md(
+            v3,
+            "projects/foobar/Kurallar.md",
+            '---\n{"project": "foobar"}\n---\n# Kurallar\n\n- foobar kuralı\n',
+        )
+        self.write_md(
+            v3,
+            "notes/projects/foo-bar/kararlar/2026-01-01-k.md",
+            '---\n{"title": "K", "project": "foo-bar"}\n---\n# K\n\n**Karar:** X\n',
+        )
+        self.write_md(
+            v3,
+            "knowledge/foobar-notu.md",
+            '---\n{"title": "Foobar Notu", "project": "foobar"}\n---\n# Foobar Notu\n\nİçerik.\n',
+        )
+        root, state = self.make_vault("personal")
+        vault.register_project(root, "foo-bar", [self.make_repo("fb1")], name="Foo Bar")
+        vault.register_project(root, "foobar", [self.make_repo("fb2")], name="FooBar")
+
+        res = migrate.import_from_beyin_v3(v3, root, state_dir=state)
+        self.assertIn("projects/foobar/Kurallar.md", res["replaced_scaffold"])
+        self.assertIn("projects/foo-bar/kararlar/2026-01-01-k.md", res["imported"])
+        self.assertIn("knowledge/foobar-notu.md", res["imported"])
+        fb_meta, _ = parse_markdown((root / "knowledge/foobar-notu.md").read_text(encoding="utf-8"))
+        self.assertEqual(fb_meta["project"], "foobar")
+        self.assertEqual(migrate._slug_for("foobar", config.load_projects(root)), "foobar")
+        self.assertEqual(migrate._slug_for("foo-bar", config.load_projects(root)), "foo-bar")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -602,7 +602,7 @@ def _filter_global_rules(grules: str, root: Path, slug: str | None) -> str:
     if slug is None:
         return grules
     proj_info = config.get_project(root, slug) or {}
-    proj_tags = {slugify(t, 24) for t in (proj_info.get("tags") or []) if t} | {slug}
+    proj_tags = {slugify(t, 24) for t in (proj_info.get("tags") or []) if t} | {slugify(slug, 24)}
     kept: list[str] = []
     hidden_rules = 0
     for ln in grules.split("\n"):
@@ -638,14 +638,24 @@ def _read_if_exists(root: Path, doc_id: str) -> str | None:
     return None
 
 
-def _trim_tail(text: str, limit: int) -> str:
+def _trim_tail(text: str, limit: int, min_keep: int | None = None) -> str:
     if len(text) <= limit:
         return text
-    cut = text[: max(0, limit)]
+    cap = max(0, limit)
+    cut = text[:cap]
+    floor = min(len(text), min_keep) if min_keep is not None else (cap // 2)
     nl = cut.rfind("\n")
-    if nl > limit // 2:
+    if nl >= floor and nl > 0:
         cut = cut[:nl]
-    return cut.rstrip() + "\n…(kısaltıldı; tamamı için memory_read kullan)"
+    trimmed = cut.rstrip()
+    if min_keep is not None and len(trimmed) < floor:
+        # rstrip veya erken kesme tabanin altina indirdiyse tam min_keep/cap koru
+        later_nl = text.find("\n", floor, cap)
+        cut = text[:later_nl] if later_nl != -1 else text[: max(cap, floor)]
+        trimmed = cut.rstrip("\n")
+        if len(trimmed) < floor:
+            trimmed = text[:floor]
+    return trimmed + "\n…(kısaltıldı; tamamı için memory_read kullan)"
 
 
 def bootstrap_context(vault_root, state_dir=None, cwd=None, project: str | None = None,
@@ -707,7 +717,7 @@ def bootstrap_context(vault_root, state_dir=None, cwd=None, project: str | None 
         handoff_left = len(handoff) - idx
         share = max(MIN_HANDOFF_CHARS, remaining // handoff_left)
         limit = max(MIN_HANDOFF_CHARS, min(remaining, share))
-        text += f"\n\n{heading}\n\n" + _trim_tail(content, limit)
+        text += f"\n\n{heading}\n\n" + _trim_tail(content, limit, min_keep=MIN_HANDOFF_CHARS)
     if relevant:
         rel = "\n\n".join(f"- **{r['title']}** (`{r['doc_id']}`)\n  {r['snippet']}" for r in relevant)
         heading = "## İlgili notlar (görev ipucu)"
@@ -974,7 +984,10 @@ def _rule_text(line: str) -> str:
     return fold_tr(m.group(2)) if m else ""
 
 
-def _find_rule_line(lines: list[str], query_text: str) -> int:
+_ARCHIVED_REMOVED_RE = re.compile(r"^- ~~(.+)~~ \*\(kaldırıldı:.*\)\*$")
+
+
+def _find_rule_line_opt(lines: list[str], query_text: str) -> int | None:
     q = fold_tr(" ".join((query_text or "").split()))
     if not q:
         raise VaultError("Eşleştirilecek kural metni boş olamaz.")
@@ -989,7 +1002,39 @@ def _find_rule_line(lines: list[str], query_text: str) -> int:
             return sub[0]
         if len(sub) > 1:
             raise VaultError(f"Birden fazla kural eşleşti ({len(sub)}); daha belirgin metin verin.")
-    raise VaultError(f"Eşleşen kural bulunamadı: {query_text!r}")
+    return None
+
+
+def _find_rule_line(lines: list[str], query_text: str) -> int:
+    idx = _find_rule_line_opt(lines, query_text)
+    if idx is None:
+        raise VaultError(f"Eşleşen kural bulunamadı: {query_text!r}")
+    return idx
+
+
+def _find_archived_removed_rule(sess: _Session, doc_id: str, query_text: str, now: datetime) -> tuple[str, str] | None:
+    month = now.strftime("%Y-%m")
+    arch_id = f"archive/{month}.md"
+    if not sess.exists(arch_id):
+        return None
+    q = fold_tr(" ".join((query_text or "").split()))
+    if not q:
+        return None
+    marker = f"<!-- kurallar: {doc_id} -->"
+    alines = sess.read(arch_id).split("\n")
+    matches: list[str] = []
+    for i, ln in enumerate(alines):
+        if ln.strip() == marker and i + 1 < len(alines):
+            m = _ARCHIVED_REMOVED_RE.match(alines[i + 1].strip())
+            if not m:
+                continue
+            rule_line = m.group(1)
+            rt = _rule_text(rule_line)
+            if rt == q or (len(q) >= 10 and rt and q in rt):
+                matches.append(rule_line)
+    if matches:
+        return arch_id, matches[-1]
+    return None
 
 
 def _archive_rule(sess: _Session, doc_id: str, old_line: str, note: str, now: datetime) -> str:
@@ -1002,8 +1047,10 @@ def _archive_rule(sess: _Session, doc_id: str, old_line: str, note: str, now: da
             {"title": f"Arşiv {month}", "kind": "note", "status": "archived", "created_at": _iso(now)},
             f"# Arşiv {month}\n",
         )
-    entry = f"\n<!-- kurallar: {doc_id} -->\n- ~~{old_line.strip()}~~ *({note})*\n"
-    sess.write(arch_id, existing.rstrip("\n") + "\n" + entry, "archive_rule")
+    entry_block = f"<!-- kurallar: {doc_id} -->\n- ~~{old_line.strip()}~~ *({note})*"
+    if entry_block in existing:
+        return arch_id
+    sess.write(arch_id, existing.rstrip("\n") + "\n\n" + entry_block + "\n", "archive_rule")
     return arch_id
 
 
@@ -1033,11 +1080,20 @@ def add_rule(vault_root, scope: str, rule_text: str = "", reason: str = "", stat
             rsn = " ".join(rsn.split())
             current = sess.read(doc_id)
             lines = current.split("\n")
-            idx = _find_rule_line(lines, rq)
-            old_line = lines.pop(idx)
-            new_text = "\n".join(lines).rstrip("\n") + "\n"
-            sha = sess.write(doc_id, new_text, "rule_remove")
+            idx = _find_rule_line_opt(lines, rq)
+            if idx is None:
+                archived_hit = _find_archived_removed_rule(sess, doc_id, rq, now)
+                if archived_hit is not None:
+                    arch_id, old_line = archived_hit
+                    cur_sha = sha256_bytes(sess.path(doc_id).read_bytes())
+                    return {"status": "removed", "path": doc_id, "removed_line": old_line,
+                            "archived": [arch_id], "sha256": cur_sha, "dlp_categories": cats}
+                raise VaultError(f"Eşleşen kural bulunamadı: {rq!r}")
+            old_line = lines[idx]
+            new_lines = lines[:idx] + lines[idx + 1 :]
+            new_text = "\n".join(new_lines).rstrip("\n") + "\n"
             arch_id = _archive_rule(sess, doc_id, old_line, f"kaldırıldı: {rsn or 'remove'}", now)
+            sha = sess.write(doc_id, new_text, "rule_remove")
             sess.sync()
             return {"status": "removed", "path": doc_id, "removed_line": old_line, "archived": [arch_id],
                     "sha256": sha, "dlp_categories": cats}
@@ -1177,6 +1233,7 @@ class _ThreadItem:
 
 _THREAD_LINE_RE = re.compile(r"^\s*-\s+\[\s*\]\s+(.*)$")
 _THREAD_TAG_RE = re.compile(r"\s*<!--\s*t:([a-z0-9_-]+)\s+h:([a-z0-9_-]+)\s*-->\s*$")
+MANAGED_THREADS_HEADING = "## Ajan Açık Konuları"
 
 
 def _make_thread_id(owner: str, text: str, used_ids: set[str]) -> str:
@@ -1194,33 +1251,58 @@ def _make_thread_id(owner: str, text: str, used_ids: set[str]) -> str:
     return f"{cand}-{n}"
 
 
-def _parse_threads(body: str) -> list[_ThreadItem]:
+def _split_threads_body(tb: str, default_title: str) -> tuple[str, str, list[_ThreadItem]]:
     items: list[_ThreadItem] = []
     used_ids: set[str] = set()
-    for ln in body.split("\n"):
+    other_lines: list[str] = []
+    for ln in tb.split("\n"):
         s = ln.strip()
-        if not s or s.startswith("#") or s == "(açık konu yok)":
-            continue
         m = _THREAD_LINE_RE.match(ln)
-        if not m:
-            continue
-        raw = m.group(1).strip()
-        tm = _THREAD_TAG_RE.search(raw)
-        if tm:
-            text = raw[: tm.start()].strip()
-            tid = tm.group(1).lower()
-            owner = tm.group(2).lower()
-            if tid in used_ids:
+        if m:
+            raw = m.group(1).strip()
+            tm = _THREAD_TAG_RE.search(raw)
+            if tm:
+                text = raw[: tm.start()].strip()
+                tid = tm.group(1).lower()
+                owner = tm.group(2).lower()
+                if tid in used_ids:
+                    tid = _make_thread_id(owner, text, used_ids)
+            else:
+                text = raw
+                owner = "legacy"
                 tid = _make_thread_id(owner, text, used_ids)
-        else:
-            text = raw
-            owner = "legacy"
-            tid = _make_thread_id(owner, text, used_ids)
-        if not text:
+            if text:
+                used_ids.add(tid)
+                items.append(_ThreadItem(id=tid, owner=owner, text=text))
             continue
-        used_ids.add(tid)
-        items.append(_ThreadItem(id=tid, owner=owner, text=text))
-    return items
+        if s == "(açık konu yok)" or s == MANAGED_THREADS_HEADING:
+            continue
+        other_lines.append(ln)
+
+    while other_lines and not other_lines[0].strip():
+        other_lines.pop(0)
+    if other_lines and other_lines[0].startswith("# ") and not other_lines[0].startswith("## "):
+        h1 = other_lines[0].rstrip()
+        rest = "\n".join(other_lines[1:]).strip()
+    else:
+        h1 = f"# {default_title} — Açık Konular"
+        rest = "\n".join(other_lines).strip()
+    return h1, rest, items
+
+
+def _compose_threads_body(h1: str, freeform_rest: str, final_items: list[_ThreadItem]) -> str:
+    items_str = (
+        "\n".join(f"- [ ] {it.text} <!-- t:{it.id} h:{it.owner} -->" for it in final_items)
+        if final_items
+        else "(açık konu yok)"
+    )
+    if freeform_rest:
+        return f"{h1}\n\n{freeform_rest}\n\n{MANAGED_THREADS_HEADING}\n\n{items_str}\n"
+    return f"{h1}\n\n{items_str}\n"
+
+
+def _parse_threads(body: str) -> list[_ThreadItem]:
+    return _split_threads_body(body, "")[2]
 
 
 def _archive_closed_threads(sess: _Session, slug: str, items: list[_ThreadItem],
@@ -1248,18 +1330,25 @@ def _archive_closed_threads(sess: _Session, slug: str, items: list[_ThreadItem],
 
 
 def _match_close_selector(items: list[_ThreadItem], sel: str) -> list[_ThreadItem]:
-    id_probe = sel[2:].strip().lower() if sel.lower().startswith("t:") else sel.strip().lower()
-    txt_probe = fold_tr(" ".join(sel.split()))
-    return [it for it in items if it.id.lower() == id_probe or fold_tr(it.text) == txt_probe]
+    s = sel.strip()
+    if s.lower().startswith("t:"):
+        id_probe = s[2:].strip().lower()
+        if not id_probe:
+            return []
+        return [it for it in items if it.id.lower() == id_probe]
+    txt_probe = fold_tr(" ".join(s.split()))
+    if not txt_probe:
+        return []
+    return [it for it in items if fold_tr(it.text) == txt_probe]
 
 
-def _update_project_threads(sess: _Session, slug: str, proj_name: str, harness: str, tag: str,
-                            now: datetime, open_threads: list[str] | None, threads_c: list[str],
-                            close_c: list[str], mode: str) -> tuple[list[_ThreadItem], list[str], str | None]:
+def _plan_project_threads(sess: _Session, slug: str, proj_name: str, harness: str,
+                          now: datetime, open_threads: list[str] | None, threads_c: list[str],
+                          close_c: list[str], mode: str) -> tuple[str, str, list[_ThreadItem], list[str]]:
     tid = f"projects/{slug}/Acik-Konular.md"
     old_ttext = sess.read(tid)
     tmeta, tb = parse_markdown(old_ttext)
-    current_items = _parse_threads(tb)
+    h1, freeform_rest, current_items = _split_threads_body(tb, proj_name)
 
     dedup_threads_c: list[str] = []
     seen_new: set[str] = set()
@@ -1289,16 +1378,20 @@ def _update_project_threads(sess: _Session, slug: str, proj_name: str, harness: 
                     explicit_closed.append(matches[0])
             else:
                 unmatched_close.append(sel)
-        new_keys = {fold_tr(t) for t in dedup_threads_c}
-        final_items: list[_ThreadItem] = []
-        new_used: set[str] = set()
-        for t in dedup_threads_c:
-            nid = _make_thread_id(harness, t, new_used)
-            new_used.add(nid.lower())
-            final_items.append(_ThreadItem(id=nid, owner=harness, text=t))
-        for it in current_items:
-            if fold_tr(it.text) not in new_keys or it in explicit_closed:
-                closed_items.append(it)
+        if open_threads is None:
+            final_items = [it for it in current_items if it not in explicit_closed]
+            closed_items = list(explicit_closed)
+        else:
+            new_keys = {fold_tr(t) for t in dedup_threads_c}
+            final_items = []
+            new_used: set[str] = set()
+            for t in dedup_threads_c:
+                nid = _make_thread_id(harness, t, new_used)
+                new_used.add(nid.lower())
+                final_items.append(_ThreadItem(id=nid, owner=harness, text=t))
+            for it in current_items:
+                if fold_tr(it.text) not in new_keys or it in explicit_closed:
+                    closed_items.append(it)
     else:
         remaining = list(current_items)
         for sel in close_c:
@@ -1344,13 +1437,9 @@ def _update_project_threads(sess: _Session, slug: str, proj_name: str, harness: 
         else:
             final_items = remaining
 
-    arch_id = _archive_closed_threads(sess, slug, closed_items, tag, harness, now) if closed_items else None
     _touch(tmeta, now)
-    items_str = "\n".join(f"- [ ] {it.text} <!-- t:{it.id} h:{it.owner} -->" for it in final_items) if final_items else "(açık konu yok)"
-    new_ttext = _meta_doc(tmeta, f"# {proj_name} — Açık Konular\n\n{items_str}\n")
-    if new_ttext != old_ttext:
-        sess.write(tid, new_ttext, "threads")
-    return closed_items, unmatched_close, arch_id
+    new_ttext = _meta_doc(tmeta, _compose_threads_body(h1, freeform_rest, final_items))
+    return old_ttext, new_ttext, closed_items, unmatched_close
 
 
 def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[str] | None = None,
@@ -1386,14 +1475,14 @@ def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[
         refs_c = [" ".join(r.split()) for r in vals[1 + n_thr : 1 + n_thr + n_ref]]
         close_c = [" ".join(c.split()) for c in vals[1 + n_thr + n_ref :]]
         if session_id and str(session_id).strip():
-            sid_clean = slugify(session_id, 48)
-            while sid_clean.startswith(f"{harness}-"):
-                sid_clean = sid_clean[len(harness) + 1 :]
-            if not sid_clean or sid_clean == harness:
+            sid_full = slugify(session_id, len(str(session_id)) + 16)
+            while sid_full.startswith(f"{harness}-"):
+                sid_full = sid_full[len(harness) + 1 :]
+            if not sid_full or sid_full == harness:
                 tag = harness
                 norm_sid = harness
             else:
-                norm_sid = sid_clean[:24].rstrip("-")
+                norm_sid = sid_full[:24].rstrip("-")
                 tag = f"{harness}-{norm_sid}"
             key = f"{slug}|{harness}|{norm_sid}"
         else:
@@ -1401,6 +1490,15 @@ def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[
             tag = None
         event_hash = sha256_bytes(key.encode("utf-8"))
         tag = tag or f"{harness}-{event_hash[:8]}"
+
+        # Tum yazmalardan ONCE acik konu guncellemesini ve close_threads secicilerini dogrula.
+        thread_plan = None
+        if slug and (open_threads is not None or close_threads is not None):
+            thread_plan = _plan_project_threads(
+                sess, slug, scope["name"] or slug, harness, now,
+                open_threads, threads_c, close_c, mode,
+            )
+
         month_dir = f"receipts/{now.strftime('%Y-%m')}"
         receipt_id = f"{month_dir}/{event_hash[:16]}.md"
         rdir = ctx.vault_root / "receipts"
@@ -1462,13 +1560,12 @@ def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[
             if text != old_text:
                 sess.write(son_id, text, "session_card", {"session": tag, "archived": len(archived)})
 
-            if open_threads is not None or close_threads is not None:
-                closed_items, unmatched_close, thr_arch = _update_project_threads(
-                    sess, slug, scope["name"] or slug, harness, tag, now,
-                    open_threads, threads_c, close_c, mode,
-                )
-                if thr_arch:
-                    archived.append(thr_arch)
+            if thread_plan is not None:
+                old_ttext, new_ttext, closed_items, unmatched_close = thread_plan
+                if closed_items:
+                    archived.append(_archive_closed_threads(sess, slug, closed_items, tag, harness, now))
+                if new_ttext != old_ttext:
+                    sess.write(f"projects/{slug}/Acik-Konular.md", new_ttext, "threads")
                 result["closed_threads"] = [it.id for it in closed_items]
                 if unmatched_close:
                     result["unmatched_close"] = unmatched_close
@@ -1519,16 +1616,19 @@ def _receipt_short_summary(body: str) -> str:
 
 def compact_receipts(vault_root, older_than_days: int = 14, project: str | None = None,
                      dry_run: bool = False, state_dir=None) -> dict:
+    days = int(older_than_days)
+    if days < 0:
+        raise VaultError("older_than_days negatif olamaz.")
     ctx = _ctx(vault_root, state_dir)
     if project is not None and config.get_project(ctx.vault_root, project) is None:
         raise VaultError(f"Bilinmeyen proje: {project!r}")
     now = _now()
-    cutoff = now - timedelta(days=int(older_than_days))
+    cutoff = now - timedelta(days=days)
     rdir = ctx.vault_root / "receipts"
     if not rdir.is_dir():
         return {"status": "ok", "dry_run": dry_run, "compacted": 0, "summaries": []}
 
-    groups: dict[tuple[str, str], list[dict]] = {}
+    groups: dict[tuple[str, str | None], list[dict]] = {}
     with _Session(ctx, "compact") as sess:
         for rel, full, st in store.iter_markdown(rdir):
             doc_id = f"receipts/{rel}"
@@ -1537,6 +1637,9 @@ def compact_receipts(vault_root, older_than_days: int = 14, project: str | None 
             text = full.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
             meta, body = parse_markdown(text)
             if meta.get("compacted_summary"):
+                continue
+            trust = str(meta.get("trust") or "trusted")
+            if trust != "trusted":
                 continue
             kind = str(meta.get("kind") or "receipt")
             status = str(meta.get("status") or "active")
@@ -1551,8 +1654,7 @@ def compact_receipts(vault_root, older_than_days: int = 14, project: str | None 
                 continue
             parts = doc_id.split("/")
             ym = parts[1] if len(parts) >= 3 and re.match(r"^\d{4}-\d{2}$", parts[1]) else dt.strftime("%Y-%m")
-            gkey = proj_slug or "genel"
-            groups.setdefault((ym, gkey), []).append({
+            groups.setdefault((ym, proj_slug), []).append({
                 "doc_id": doc_id,
                 "meta": dict(meta),
                 "body": body,
@@ -1562,42 +1664,69 @@ def compact_receipts(vault_root, older_than_days: int = 14, project: str | None 
 
         compacted = 0
         summary_ids: set[str] = set()
-        for (ym, gkey), items in sorted(groups.items()):
-            if len(items) < 2:
+        for (ym, proj_slug), items in sorted(groups.items(), key=lambda kv: (kv[0][0], "" if kv[0][1] is None else kv[0][1])):
+            if proj_slug is None:
+                summary_id = f"receipts/{ym}/_vault-ozet.md"
+                label = "genel (kasa)"
+            else:
+                summary_id = f"receipts/{ym}/{proj_slug}-ozet.md"
+                label = proj_slug
+            summary_exists = sess.exists(summary_id)
+            if len(items) < 2 and not summary_exists:
                 continue
             items.sort(key=lambda x: (x["dt"], x["doc_id"]))
-            summary_id = f"receipts/{ym}/{gkey}-ozet.md"
-            grp_proj = items[0]["proj_slug"]
-            if sess.exists(summary_id):
+            if summary_exists:
                 smeta, sbody = parse_markdown(sess.read(summary_id))
+                existing_proj = smeta.get("project")
+                existing_proj = existing_proj.strip() if isinstance(existing_proj, str) and existing_proj.strip() else None
+                if existing_proj != proj_slug:
+                    raise VaultError(
+                        f"Özet dosyası proje sahibi uyuşmuyor ({summary_id}): beklenen={proj_slug!r}, mevcut={existing_proj!r}"
+                    )
+                if str(smeta.get("trust") or "trusted") != "trusted":
+                    raise VaultError(f"Güvenilmeyen özet dosyası güncellenemez: {summary_id}")
                 smeta = dict(smeta)
                 _touch(smeta, now)
             else:
                 smeta = {
-                    "title": f"Makbuz Özeti {ym} ({gkey})",
+                    "title": f"Makbuz Özeti {ym} ({label})",
                     "kind": "receipt",
-                    "project": grp_proj,
+                    "project": proj_slug,
                     "status": "active",
+                    "trust": "trusted",
                     "compacted_summary": True,
                     "created_at": _iso(now),
                     "updated_at": _iso(now),
                 }
-                sbody = f"# Makbuz Özeti {ym} ({gkey})\n"
+                sbody = f"# Makbuz Özeti {ym} ({label})\n"
+
+            lines = sbody.split("\n")
+            body_changed = False
             new_bullets: list[str] = []
             for it in items:
                 doc_id = it["doc_id"]
                 link_ref = f"[[{doc_id[:-3]}]]"
-                if link_ref in sbody:
-                    continue
                 created_date = str(it["meta"].get("created_at") or "")[:10] or it["dt"].strftime("%Y-%m-%d")
                 session = str(it["meta"].get("session") or Path(doc_id).stem)
                 short_sum = _receipt_short_summary(it["body"])
-                new_bullets.append(f"- **{created_date} · {session}** ({link_ref}): {short_sum}")
+                bullet = f"- **{created_date} · {session}** ({link_ref}): {short_sum}"
+                marker = f"({link_ref}):"
+                matched_idx = next((i for i, ln in enumerate(lines) if marker in ln), None)
+                if matched_idx is not None:
+                    if lines[matched_idx] != bullet:
+                        lines[matched_idx] = bullet
+                        body_changed = True
+                else:
+                    new_bullets.append(bullet)
+
             if not dry_run:
-                if new_bullets:
-                    merged_body = sbody.rstrip("\n") + "\n\n" + "\n".join(new_bullets) + "\n"
+                if body_changed or new_bullets:
+                    merged_body = "\n".join(lines).rstrip("\n")
+                    if new_bullets:
+                        merged_body = merged_body + "\n\n" + "\n".join(new_bullets)
+                    merged_body += "\n"
                     sess.write(summary_id, _meta_doc(smeta, merged_body), "compact_summary",
-                               {"count": len(new_bullets)})
+                               {"count": len(new_bullets), "updated": body_changed})
                 for it in items:
                     imeta = it["meta"]
                     imeta["status"] = "archived"

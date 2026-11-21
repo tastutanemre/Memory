@@ -33,9 +33,14 @@ TOOLS = [
     {
         "name": "memory_bootstrap",
         "description": "Oturum başında çağır: Core, genel/proje kuralları, açık konular, son oturum kartı ve (task_hint ile) ilgili notları döndürür. "
+                       "Zorunlu kurallar asla kesilmez ve Açık konular + Son oturum bölümlerinin her biri için 1200 karakterlik taban pay korunur; "
+                       "kurallar budget_chars sınırını doldurduğunda veya aştığında toplam çıktı budget_chars değerini ~2400+ karakter aşabilir. "
                        "Çalışma alanı beyaz listede değilse status=unregistered_workspace döner; o durumda hafızaya hiçbir şey yazma.",
         "inputSchema": _obj({**_SCOPE_PROPS, "task_hint": _STR,
-                             "budget_chars": {"type": "integer", "minimum": 500, "maximum": 50000}}, ["cwd"]),
+                             "budget_chars": {
+                                 "type": "integer", "minimum": 500, "maximum": 50000,
+                                 "description": "Hedef karakter bütçesi (varsayılan 8000). Zorunlu kurallar kesilmez ve açık konular + son oturum için 1200'er karakterlik taban pay korunduğundan toplam çıktı bu sınırı ~2400+ karakter aşabilir.",
+                             }}, ["cwd"]),
     },
     {
         "name": "memory_search",

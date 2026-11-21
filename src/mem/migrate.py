@@ -39,6 +39,9 @@ def _norm(text: str) -> str:
 
 def _slug_for(folder: str, projects: list[dict]) -> str:
     """v3 klasor adini kayitli projeye esler (`OrderService` == `order-service`); yoksa slugify."""
+    for p in projects:
+        if p["slug"] == folder:
+            return p["slug"]
     n = _norm(folder)
     for p in projects:
         if _norm(p["slug"]) == n or _norm(p.get("name", "")) == n:

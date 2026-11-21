@@ -130,6 +130,14 @@ Bağlantı kurulduğunda yapay zekâ ajanınız şu MCP araçlarını doğrudan 
 
 ---
 
+## Bilinen Sınırlar ve Çok Ajanlı Davranış
+
+- **Ajan (`harness`) düzeyinde açık konu sahipliği:** `Acik-Konular.md` içindeki madde sahipliği `harness` (`claude`, `antigravity`, `codex`, `devin`) kimliğine göre tutulur. Bu nedenle her istemci için `python mem.py connect <hedef>` çalıştırılarak MCP argümanlarına `--harness <hedef>` eklenmelidir (aksi durumda yapılandırılmamış sunucular `mcp` varsayılanını paylaşır). **Aynı proje üzerinde aynı anda tam olarak aynı `harness` kimliğiyle çalışan iki paralel oturum** sahipliği paylaşır; bu durumda `threads_mode='merge'` (varsayılan) modunda bir oturumun `open_threads` güncellemesi, aynı `harness`'a ait diğer oturumun listede yer almayan maddelerini arşive kaldırabilir.
+- **`session_id` normalizasyonu:** `session_id` değerinden önce tekrarlanan `<harness>-` önekleri temizlenir, ardından kalan ek en fazla **24 karaktere** kırpılır; aynı proje ve `harness` altındaki farklı oturumların ilk 24 karakter içinde ayrışması gerekir.
+- **`bootstrap` bütçe tabanı (`budget_chars`):** `Core.md`, genel kurallar ve proje kuralları asla kesilmez; `Acik-Konular.md` ve `Son-Oturum.md` bölümlerinin her biri için **1.200 karakterlik taban pay** korunur. Zorunlu kurallar `budget_chars` sınırını doldurduğunda veya aştığında toplam çıktı `budget_chars` değerini **~2.400+ karakter** aşabilir.
+
+---
+
 ## Komut Satırı (CLI) Kullanımı
 
 MCP dışında doğrudan terminalden de tüm işlemler yapılabilir (`--json` bayrağı makine okunur çıktı üretir):
@@ -139,7 +147,7 @@ python mem.py bootstrap --task "kimlik doğrulama" --budget 8000
 python mem.py decide --title "Önbellek katmanı" --decision "Okuma yoğun uçlarda Redis kullanılacak" --rationale "Düşük gecikme"
 python mem.py decide --shared --title "API sürümleme" --decision "Tüm servisler /v1/ öneki kullanır"
 python mem.py rule "Her veritabanı şema değişikliği geri alınabilir migrasyon içermeli" --reason "Canlı güvenlik" --scope global --tag python
-python mem.py rule "Tüm API uçları şema doğrulaması kullanmalı" --supersedes "Her veritabanı şema değişikliği geri alınabilir migrasyon içermeli"
+python mem.py rule "Tüm API uçları şema doğrulaması kullanmalı" --scope global --supersedes "Her veritabanı şema değişikliği geri alınabilir migrasyon içermeli"
 python mem.py rule "Eski geçici kural" --remove
 python mem.py search "önbellek kararları" --limit 10 --include-superseded
 python mem.py read projects/backend-api/Backend-API.md
