@@ -53,7 +53,7 @@ Aynı projede aynı anda hem bir planlama ajanı (ör. Claude) hem bir uygulama 
 | **Tek Doğruluk Kaynağı = Markdown** | Tüm bilgi insan tarafından okunabilir düz `.md` dosyalarındadır. SQLite veritabanı (`index.sqlite3`) yalnızca hız için tutulan türetilmiş bir yan indekstir; silinse bile saniyeler içinde Markdown dosyalarından birebir yeniden kurulur. |
 | **Sıfır Harici Bağımlılık** | Sanal ortam (`venv`), `pip install`, Docker veya harici veritabanı sunucusu gerektirmez. Python 3.11+ kurulu her makinede doğrudan `python mem.py` ile çalışır. |
 | **Sıfır Arka Plan Servisi** | Sistem açılışına yerleşen gizli bir daemon yoktur. MCP sunucusu yalnızca IDE/asistan açıkken standart girdi/çıktı (`stdio`) üzerinden konuşur ve istemci kapandığında sonlanır. |
-| **Önce Beyaz Liste (`projects.json`)** | Kayıtlı olmayan bir klasörde (`cwd`) açılan ajan kasadan tek bir karakter bile okuyamaz ve kasaya hiçbir şey yazamaz (`status: unregistered_workspace`). |
+| **Önce Beyaz Liste (`projects.json`)** | Proje kapsamındaki istemcilerde kayıtlı olmayan bir klasörde (`cwd`) açılan ajan kasadan tek bir karakter bile okuyamaz ve kasaya hiçbir şey yazamaz (`status: unregistered_workspace`). *(Yalnızca `--vault-scope` ile bağlanan masaüstü sohbet istemcileri tüm kasayı kapsayacak şekilde yapılandırılır.)* |
 | **Varsayılan Açık Sır Kalkanı (DLP)** | API anahtarları, JWT'ler, özel anahtarlar (`PEM`/`PGP`), veritabanı bağlantı dizeleri, TCKN ve IBAN verileri diske inmeden önce yakalanır (`work` profilinde yazma reddedilir, `personal` profilinde maskelenir). |
 | **Kasa ve Durum İzolasyonu** | İndeks (`index.sqlite3`), kilit (`writer.lock`) ve otomatik yedekler (`backups/`) her zaman Markdown kasasının **dışında** tutulur; Git veya Obsidian senkronizasyonunu kirletmez. |
 
@@ -100,11 +100,11 @@ flowchart LR
 Her MCP çağrısı aktif çalışma alanı yolunu (`cwd`) gönderir. `mem`, bu yolu `norm_path` (`realpath` + küçük harf normalizasyonu) ile çözer ve `projects.json` içindeki kayıtlı proje kökleriyle karşılaştırır:
 - İç içe (monorepo) dizinlerde **en uzun eşleşen kök dizin** kazanır.
 - Çalışma alanı beyaz listede değilse anında `unregistered_workspace` döner; hiçbir kasa verisi dışarı sızmaz.
-- Bir projede çalışan ajan başka bir projenin özel notlarını okuyamaz ve yamayamaz (`projects/<diğer>/...` erişimi reddedilir); yalnızca kendi projesine ve `knowledge/` altındaki ortak bilgi notlarına erişebilir.
+- Proje kapsamında çalışan bir ajan başka bir projenin özel notlarını okuyamaz ve yamayamaz (`projects/<diğer>/...` erişimi reddedilir); yalnızca kendi projesine ve `knowledge/` altındaki ortak bilgi notlarına erişebilir. *(Masaüstü genel sohbet için `--vault-scope` ile bağlanan `claude-desktop` ise bilerek tam kasa kapsamında çalışır.)*
 
 ### 3.2. Artımlı İndeksleme ve Başlık Duyarlı Pasajlama (`store.py`)
 Arama veya `bootstrap` çağrıldığında `sync_vault` çalışır:
-1. Kasa içindeki `.md` dosyalarının `(mtime_ns, size_bytes)` değerlerini `documents` tablosuyla karşılaştırır. Değişmemiş dosyalar diskten **hiç okunmaz** (750+ notluk bir kasada senkronizasyon milisaniyeler sürer). Sembolik linkler ve `.git`, `.obsidian`, `node_modules` dizinleri güvenlik gereği atlanır.
+1. Kasa içindeki `.md` dosyalarının `(mtime_ns, size_bytes)` değerlerini `documents` tablosuyla karşılaştırır. Değişmemiş dosyalar diskten **hiç okunmaz** (~750 notluk bir kasada değişiklik yokken senkronizasyon ~100 ms mertebesinde tamamlanır). Sembolik linkler ve `.git`, `.obsidian`, `node_modules` dizinleri güvenlik gereği atlanır.
 2. Yeni veya değişmiş dosyalar kod bloklarını (` ``` ` / ` ~~~ `) ortadan bölmeden, Markdown başlık hiyerarşisini (`Servis Mimarisi > Önbellek > TTL`) koruyarak ~900 karakterlik anlamlı pasajlara (`passages`) ayrılır.
 3. Gövdedeki tüm `[[WikiLink]]` bağlantıları `links` tablosuna, karar geçersiz kılma ilişkileri `supersedes` tablosuna işlenir.
 
@@ -182,22 +182,24 @@ python mem.py init --profile work --vault C:\Users\<Kullanici>\MemVault\work
 Hafızanın aktif olmasını istediğiniz her yazılım projesini kaydedin:
 
 ```bash
-# Tek kök dizinli ve etiketli proje kaydı
-python mem.py --profile personal project add order-service \
+# Tek kök dizinli ve etiketli proje kaydı (--profile alt komuttan sonra verilir)
+python mem.py project add order-service \
+  --profile personal \
   --root /dev/repos/order-service \
   --name "Order Service" \
   --description "Sipariş ve stok mikroservisi" \
   --tag python --tag fastapi
 
 # Birden fazla klasörü (ör. web + mobil) aynı projeye bağlama
-python mem.py --profile personal project add commerce-app \
+python mem.py project add commerce-app \
+  --profile personal \
   --root /dev/repos/commerce-web \
   --root /dev/repos/commerce-mobile \
   --name "Commerce App" \
   --tag typescript --tag react-native
 
 # Kayıtlı projeleri görüntüleme
-python mem.py --profile personal project list
+python mem.py project list --profile personal
 ```
 
 ### 4.4. Yapay Zekâ Araçlarına Bağlayın (`connect`)
@@ -301,7 +303,7 @@ Mevcut bir notu `sha256` iyimser kilidiyle cerrahi olarak günceller.
 - **Davranış:** Dosya başka bir ajan tarafından değiştirilmişse `ConcurrencyConflictError` döner. Her `old` metni dosyada tam olarak **1 kez** geçmelidir.
 
 ### `memory_finish`
-Anlamlı bir iş tamamlandığında oturum makbuzu (`receipts/YYYY-MM/<hash>.md`), `Son-Oturum.md` devir kartı (son 3–5 kart aktif tutulur, eskiler `archive/YYYY-MM.md`'ye kayar) ve `Acik-Konular.md` güncellemesini tek atomik işlemde yapar.
+Anlamlı bir iş tamamlandığında oturum makbuzu (`receipts/YYYY-MM/<hash>.md`), `Son-Oturum.md` devir kartı (son 3–5 kart aktif tutulur, eskiler `archive/YYYY-MM.md`'ye kayar) ve `Acik-Konular.md` güncellemesini tek yazar kilidi (`VaultLock`) altında, her dosya için ayrı atomik yazımla (`fsync` + `os.replace`) yürütür.
 - **Parametreler:** `summary` *(zorunlu)*, `cwd`, `open_threads` *(string listesi)*, `close_threads` *(string listesi — `t:<id>` veya tam metin)*, `threads_mode` *(`'merge'` varsayılan | `'replace'`)*, `refs` *(string listesi)*, `session_id` *(string)*, `harness` *(string — sunucuda `--harness` yapılandırılmışsa sunucu kimliği her zaman önceliklidir)*.
 - **Atomik Ön Doğrulama:** `close_threads` içinde belirsiz (birden fazla maddeyle eşleşen) bir seçici varsa hiçbir makbuz, oturum kartı veya arşiv yazılmadan önce `VaultError` döner.
 
@@ -373,7 +375,7 @@ python mem.py mcp --profile personal --harness claude [--vault-scope] [--advisor
 4. **`connection_string`:** `postgres://`, `mysql://`, `mongodb+srv://`, `redis://`, `amqps://`, `sqlserver://` bağlantı URI'leri *(kimlik bilgisi içermeyen yerel `localhost` / `127.0.0.1` bağlantıları yanlış alarm vermemek için muaf tutulur)* ve sıra bağımsız ADO.NET `Server=...;Password=...` dizeleri.
 5. **`generic_secret_assignment`:** `.env`, JSON veya YAML biçimindeki `api_key=...`, `access_token: "..."`, `client_secret=...`, `DB_PASSWORD=...`, `JWT_SECRET=...` atamaları.
 6. **`pii_tr`:** Resmi 10. ve 11. hane algoritma doğrulamasından geçen **T.C. Kimlik Numaraları** ve **TR IBAN** numaraları.
-7. **`custom_pattern` (`dlp-patterns.txt`):** Kasa kökündeki `dlp-patterns.txt` dosyasına eklediğiniz şirket içi alan adları, IP blokları veya özel token önekleri (ör. `regex:\birket_[A-Za-z0-9]{16,}`). Regex desenleri ReDoS saldırılarına karşı uzunluk (`<=200`) ve iç içe nicelik denetiminden geçirilir.
+7. **`custom_pattern` (`dlp-patterns.txt`):** Kasa kökündeki `dlp-patterns.txt` dosyasına eklediğiniz şirket içi alan adları, IP blokları veya özel token önekleri (ör. `regex:\bsirket_[A-Za-z0-9]{16,}`). Regex desenleri ReDoS saldırılarına karşı uzunluk (`<=200`) ve iç içe nicelik denetiminden geçirilir.
 
 > **Dürüst Sınır:** Bilinen bir öneki olmayan **ve** başında `token=` / `secret=` gibi bir anahtar adı bulunmadan düz cümlenin içine çıplak yapıştırılmış özel rastgele dizeleri hiçbir desen tarayıcısı tek başına %100 bilemez. Özel iç anahtar biçimleriniz varsa `dlp-patterns.txt` içine tek satırlık önek eklemeniz önerilir.
 
@@ -481,8 +483,9 @@ gh repo create kullanici/mem-vault-private --private --source . --remote origin 
 
 - **`Could not find platform independent libraries` (Windows Python hatası):**
   `mem` kaynaklı değildir; sisteminizde bozuk bir `PYTHONHOME` veya `PYTHONPATH` ortam değişkeni tanımlıdır ya da proje klasörünüzün adı Python kurulum diziniyle çakışıyordur. Ortam değişkenlerinden `PYTHONHOME`'u temizleyin veya tam Python yorumlayıcı yolunu kullanın.
-- **`connect` çalıştırdım ama ajan hâlâ `harness: mcp` olarak yazıyor:**
-  Açık olan IDE veya masaüstü uygulaması eski MCP alt sürecini bellekte tutuyordur. Uygulamayı tamamen kapatıp yeniden açın *(Windows'ta Claude Desktop penceresini `X` ile kapatmak uygulamayı sistem tepsisine küçültür; sağ alt tepsi simgesinden **Quit** seçerek yeniden başlatın)*.
+- **`connect` çalıştırdım ama ajan hâlâ `harness: mcp` olarak yazıyor (veya Claude Desktop ayarında `--harness` siliniyor):**
+  1. Açık olan IDE veya CLI oturumu eski MCP alt sürecini bellekte tutuyordur; uygulamayı yeniden başlatın.
+  2. **Claude Desktop özel durumu:** Claude Desktop çalışırken `claude_desktop_config.json` dosyasını bellekte tutar ve uygulamadan çıkarken bellekteki eski kopyayı diske yazarak dışarıdan yapılan değişiklikleri ezebilir *(Windows'ta pencereyi `X` ile kapatmak uygulamayı sistem tepsisine küçültür)*. Bu nedenle **önce** sağ alt sistem tepsisinden **Quit** seçerek Claude Desktop'ı tamamen kapatın, **sonra** `python mem.py connect claude-desktop --profile personal` komutunu çalıştırın ve uygulamayı ardından açın.
 - **`doctor` çıktısında `[WARN] Bootstrap kural bütçesi` uyarısı alıyorum:**
   `Core.md`, `Kurallar.md` veya ilgili projenin `projects/<slug>/Kurallar.md` dosyası büyümüştür. Yalnızca belirli teknolojileri ilgilendiren genel kurallara `--tag` ekleyin ve eskiyen kuralları `memory_rule(..., supersedes=...)` veya `--remove` ile arşive taşıyın.
 - **`ConcurrencyConflictError` (`sha256` uyuşmazlığı) hatası:**
