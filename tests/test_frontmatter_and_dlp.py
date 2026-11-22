@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 
 from _helpers import IsolatedCase
@@ -153,7 +154,25 @@ class DlpUnitTests(IsolatedCase):
             "API_TOKEN=a8f3k2m9q7x1z5",
             "GITHUB_TOKEN=a8f3k2m9q7x1z5",
             '{"token": "a8f3k2m9q7x1z5"}',
+            'accessToken: "a8f3k2m9q7x1z5"',
+            "refreshToken=a8f3k2m9q7x1z5",
+            "authToken=a8f3k2m9q7x1z5",
+            "githubToken=a8f3k2m9q7x1z5",
+            "adminToken=a8f3k2m9q7x1z5",
+            "ADMINTOKEN=a8f3k2m9q7x1z5",
+            "dbPassword=a8f3k2m9q7x1z5",
+            "DBPASSWORD=a8f3k2m9q7x1z5",
+            "userpassword: a8f3k2m9q7x1z5",
+            "adminPwd=a8f3k2m9q7x1z5",
+            'clientSecret: "a8f3k2m9q7x1z5"',
+            'apiKey: "a8f3k2m9q7x1z5"',
+            "password=https://x.example.com/abc",
+            "webhook_secret=https://hooks.example.com/T00/B00/XYZ12345",
+            "password=<tag>RealSecret123456",
+            "password=${ENV}RealSecret123456",
+            "password=[REDACTED:x]RealSecret123456",
             "https://api.example.com/cb?token=a8f3k2m9q7x1z5",
+            "https://api.example.com/cb?accessToken=a8f3k2m9q7x1z5",
             "https://api.example.com/v1?foo=1&api_key=secretkey12345",
             "https://app.example.com/cb#access_token=tok_abcdef123456",
         ]
@@ -161,56 +180,109 @@ class DlpUnitTests(IsolatedCase):
             cats = {f["category"] for f in dlp.scan(s, None)}
             self.assertIn("generic_secret_assignment", cats, f"yakalanmadi: {s}")
             redacted, _ = dlp.inspect_and_apply(s, "redact", None)
-            self.assertNotIn("a8f3k2m9", redacted)
-            self.assertNotIn("secretkey12345", redacted)
-            self.assertNotIn("tok_abcdef", redacted)
+            for secret_frag in (
+                "a8f3k2m9",
+                "secretkey12345",
+                "tok_abcdef",
+                "x.example.com/abc",
+                "XYZ12345",
+                "RealSecret123456",
+            ):
+                self.assertNotIn(secret_frag, redacted)
 
         safe_non_secrets = [
             "max_tokens=16384000",
             "max_token=80000000",
+            "maxToken=80000000",
+            "MAXTOKEN=80000000",
+            "minToken=10000000",
             "completion_tokens: 12345678",
             "next_page_token=eyJpageCursor123",
+            "nextPageToken=eyJpageCursor123",
+            "pageToken=cursor_12345678",
             "cancel_token=req_cancel_12345",
+            "cancelToken=req_cancel_12345",
+            "csrf_token=csrf_12345678",
+            "csrfToken=csrf_12345678",
             "token_type = 'authorization_code'",
             "token_endpoint = 'https://auth.example.com/oauth2/token'",
             "GITHUB_TOKEN=${GITHUB_TOKEN}",
             "API_TOKEN=<api_anahtariniz>",
             "https://api.example.com/list?page_token=cursor_12345678",
+            "https://api.example.com/list?nextPageToken=cursor_12345678",
+            "https://api.example.com/v1?auth_bypass=disabled_in_prod",
             "https://api.example.com/cb?token=<gecici_token>",
         ]
         for s in safe_non_secrets:
             self.assertEqual(dlp.scan(s, None), [], f"yanlis alarm: {s}")
 
     def test_ipv6_localhost_authorization_prose_and_iban_mod97(self):
-        # IPv6 [::1] localhost muafiyeti
+        # IPv6 [::1] localhost muafiyeti ve HTTP kimlik bilgili/bilgisiz URI ayrimi
         self.assertEqual(dlp.scan("postgres://[::1]:5432/app", None), [])
         self.assertEqual(dlp.scan("redis://[::1]/0", None), [])
         self.assertEqual(dlp.scan("https://[::1]:8080/health", None), [])
+        self.assertEqual(dlp.scan("https://example.com:8443?email=user@example.net", None), [])
+        self.assertEqual(dlp.scan("https://example.com:8443#user@section", None), [])
         self.assertTrue(dlp.scan("postgres://appuser:S3cretPass@[::1]:5432/app", None))
         self.assertTrue(dlp.scan("postgres://[::1]:5432/app?password=S3cretPass", None))
         self.assertTrue(dlp.scan("https://svc:S3cretPass@api.example.com/hook", None))
+        empty_user_uri = "https://:m7Q2v9L4r6Z8@api.example.com/v1"
+        cats = {f["category"] for f in dlp.scan(empty_user_uri, None)}
+        self.assertIn("connection_string", cats)
+        redacted_uri, _ = dlp.inspect_and_apply(empty_user_uri, "redact", None)
+        self.assertNotIn("m7Q2v9L4r6Z8", redacted_uri)
 
-        # Authorization: duz cumle vs gercek baslik
+        # Authorization: duz cumle vs gercek baslik (parametreli Digest/OAuth dahil)
         for prose in (
             "Authorization: gerekli degil",
             "Authorization: başlığı zorunludur",
             "Authorization: Bearer <token>",
+            "Authorization: Digest <parametreler>",
+            "Authorization: Digest şeması eski sistemde kaldı",
         ):
             self.assertEqual(dlp.scan(prose, None), [], f"yanlis alarm: {prose}")
         for real_hdr in (
+            "Authorization: Bearer abcd",
             "Authorization: Bearer abcdefghijkl",
             "Authorization: Basic dXNlcjpwYXNz",
             "Authorization: Token a8f3k2m9q7x1z5",
             "Authorization: ApiKey k_1234567890abcdef",
+            "Authorization: SharedKey myaccount:ctzMq410TV3wS7upTBcunJTDLEJwMAZuFPfr0mrrA08=",
             "Authorization: rawSecret9876543210",
         ):
             cats = {f["category"] for f in dlp.scan(real_hdr, None)}
             self.assertIn("jwt_bearer", cats, f"yakalanmadi: {real_hdr}")
+        digest_hdr = (
+            'Authorization: Digest username="alice", realm="api", '
+            'response="0123456789abcdef0123456789abcdef"\nHost: api.example.com'
+        )
+        redacted_digest, digest_findings = dlp.inspect_and_apply(digest_hdr, "redact", None)
+        self.assertTrue(any(f["category"] == "jwt_bearer" for f in digest_findings))
+        self.assertNotIn("alice", redacted_digest)
+        self.assertNotIn("0123456789abcdef", redacted_digest)
+        self.assertIn("Host: api.example.com", redacted_digest)
 
         # TR IBAN ISO 7064 Mod-97 kontrol hanesi dogrulamasi
         self.assertTrue(dlp.valid_tr_iban("TR33 0006 1005 1978 6457 8413 26"))
         self.assertFalse(dlp.valid_tr_iban("TR00 0006 1005 1978 6457 8413 26"))
         self.assertEqual(dlp.scan("ornek TR00 0006 1005 1978 6457 8413 26 gecersiz", None), [])
+
+        # Placeholder onek bypass'i ve dogrusal sure (ReDoS) korumasi
+        mixed_digest = 'Authorization: Digest <placeholder>, response="6629fae49393a05397450978507c4ef1"'
+        redacted_mixed, mixed_fs = dlp.inspect_and_apply(mixed_digest, "redact", None)
+        self.assertTrue(mixed_fs)
+        self.assertNotIn("6629fae4", redacted_mixed)
+        self.assertTrue(dlp.scan('Authorization: Bearer "super_secret_token_999"', None))
+
+        t0 = time.perf_counter()
+        for adv in (
+            "a-" * 5000 + "x",
+            "a." * 5000 + "x",
+            "Authorization: Digest aaaa" + " " * 15000 + "b",
+            "http://" + ":" * 5000 + "x",
+        ):
+            self.assertEqual(dlp.scan(adv, None), [])
+        self.assertLess(time.perf_counter() - t0, 0.5)
 
 
 if __name__ == "__main__":
