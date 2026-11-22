@@ -91,20 +91,21 @@ _ADO_CONTEXT = re.compile(
 _CAMEL_LOWER_UPPER_RE = re.compile(r"([a-z0-9])([A-Z])")
 _CAMEL_ACRONYM_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _NON_SECRET_TOKEN_KEY_RE = re.compile(
-    r"(?:^|[_.\-])(?:max|min|total|input|output|prompt|completion|thinking|cached|num|budget|"
-    r"page|next[_.\-]?page|prev[_.\-]?page|continuation|cancel|cancellation|stop|csrf|xsrf)[_.\-]?token$"
+    r"(?:(?:^|[_.\-])(?:max|min|total|input|output|prompt|completion|thinking|cached|num|budget|"
+    r"cancel|cancellation|stop|csrf|xsrf)"
+    r"|^(?:page|next[_.\-]?page|prev[_.\-]?page|continuation))[_.\-]?token$"
 )
 _NON_SECRET_PASS_WORD_RE = re.compile(r"(?:^|[_.\-])(?:by|com|sur|tres|over|under)pass$")
 _CONN_URI_QUERY_SECRET = re.compile(
     r"(?<=[?&#;])(?P<key>[A-Za-z0-9_.\-]*"
     r"(?:password|passwd|pwd|pass|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key))"
-    r"=(?P<val>[^&#;\s\"'<>]+)",
+    r"=(?P<val>[^&#;\s\"'`<>]+)",
     _I,
 )
 _URI_QUERY_PARAM = re.compile(
     r"(?<=[?&#;])(?P<key>[A-Za-z0-9_.\-]*"
     r"(?:password|passwd|pwd|pass|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key))"
-    r"=(?P<val>[^&#;\s\"'<>]{8,})",
+    r"=(?P<val>[^&#;\s\"'`<>]{8,})",
     _I,
 )
 # `DB_PASSWORD=`, `dbPassword=`, `accessToken:`, `GITHUB_TOKEN=`, `TOKEN=`, `"token": "..."` dahil.
@@ -112,7 +113,7 @@ _GENERIC = re.compile(
     r"(?<![A-Za-z0-9_.\-])(?P<key>[A-Za-z0-9_.\-]*"
     r"(?:api[_-]?key|access[_-]?key|secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|"
     r"client[_-]?secret|secret|password|passwd|pwd|token))"
-    r"[\"']?\s*[:=]\s*[\"']?(?P<val>(?:\$\{[^{}\s]+\}|\{\{[^{}\s]+\}\}|[^\s\"',;\}])+)",
+    r"[\"']?\s*[:=]\s*[\"']?(?P<val>(?:\$\{[^{}\s`]+\}|\{\{[^{}\s`]+\}\}|[^\s\"'`,;\}])+)",
     _I,
 )
 _IBAN = re.compile(r"\bTR\d{2}\s?(?:\d{4}\s?){5}\d{2}\b")
@@ -128,12 +129,12 @@ for _p in _JWT_PATTERNS:
 
 _PLACEHOLDER_FULL_RE = re.compile(
     r"^(?:"
-    r"<[^<>\r\n]+>"
-    r"|\$\{[^{}\r\n]+\}"
-    r"|\{\{[^{}\r\n]+\}\}"
-    r"|\[REDACTED:[^\[\]\r\n]+\]"
+    r"<[^<>\r\n`]+>"
+    r"|\$\{[^{}\r\n`]+\}"
+    r"|\{\{[^{}\r\n`]+\}\}"
+    r"|\[REDACTED:[^\[\]\r\n`]+\]"
     r"|\$[A-Z_][A-Z0-9_]*"
-    r")$"
+    r")+$"
 )
 
 
@@ -152,7 +153,8 @@ def _is_placeholder_value(val: str) -> bool:
 
 
 def _is_non_secret_key(key: str) -> bool:
-    norm = _CAMEL_LOWER_UPPER_RE.sub(r"\1_\2", key)
+    leaf = key.rsplit(".", 1)[-1].lstrip("-")
+    norm = _CAMEL_LOWER_UPPER_RE.sub(r"\1_\2", leaf)
     norm = _CAMEL_ACRONYM_RE.sub(r"\1_\2", norm).lower()
     if _NON_SECRET_TOKEN_KEY_RE.search(norm):
         return True
