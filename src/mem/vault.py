@@ -353,7 +353,7 @@ def _normalize_tags(tags: list[str] | None) -> list[str]:
         s = (t or "").strip()
         if not s:
             continue
-        norm = slugify(s, 32)
+        norm = slugify(s, 63)
         if norm not in seen:
             seen.add(norm)
             out.append(norm)
@@ -598,22 +598,68 @@ _RULE_LINE_RE = re.compile(
 )
 
 
+def _build_legacy_tag_map(all_projects: list[dict], rule_tags_list: list[set[str]]) -> tuple[dict[str, str | None], set[str]]:
+    """32 karakter sinirinda kesilmis eski etiketleri yalniz tekil bir 33-63 kr hedef varsa eslestirir."""
+    exact_slugs = {p["slug"] for p in all_projects if p.get("slug")}
+    long_tags: set[str] = {s for s in exact_slugs if len(s) > 32}
+    for p in all_projects:
+        for t in p.get("tags") or ():
+            if t:
+                nt = slugify(t, 63)
+                if len(nt) > 32:
+                    long_tags.add(nt)
+    for rset in rule_tags_list:
+        for nt in rset:
+            if len(nt) > 32:
+                long_tags.add(nt)
+    legacy_map: dict[str, str | None] = {}
+    for full in long_tags:
+        trunc = slugify(full, 32)
+        if trunc in legacy_map and legacy_map[trunc] != full:
+            legacy_map[trunc] = None
+        else:
+            legacy_map[trunc] = full
+    return legacy_map, exact_slugs
+
+
+def _expand_tag_set(tags: set[str], legacy_map: dict[str, str | None], exact_slugs: set[str]) -> set[str]:
+    expanded = set(tags)
+    for t in tags:
+        if t not in exact_slugs:
+            full = legacy_map.get(t)
+            if full:
+                expanded.add(full)
+    return expanded
+
+
 def _filter_global_rules(grules: str, root: Path, slug: str | None) -> str:
     if slug is None:
         return grules
-    proj_info = config.get_project(root, slug) or {}
-    proj_tags = {slugify(t, 32) for t in (proj_info.get("tags") or []) if t} | {slug}
+    all_projects = config.load_projects(root)
+    proj_info = next((p for p in all_projects if p.get("slug") == slug), None) or {}
+    raw_proj_tags = {slugify(t, 63) for t in (proj_info.get("tags") or []) if t} | {slug}
+    lines = grules.split("\n")
+    parsed_rule_tags: list[set[str] | None] = []
+    for ln in lines:
+        rm = _RULE_LINE_RE.match(ln)
+        if rm and rm.group(1):
+            parsed_rule_tags.append({slugify(x.strip(), 63) for x in rm.group(1).split(",") if x.strip()})
+        else:
+            parsed_rule_tags.append(None)
+    legacy_map, exact_slugs = _build_legacy_tag_map(
+        all_projects, [rt for rt in parsed_rule_tags if rt]
+    )
+    proj_tags = _expand_tag_set(raw_proj_tags, legacy_map, exact_slugs)
     kept: list[str] = []
     hidden_rules = 0
-    for ln in grules.split("\n"):
+    for ln, rtags_raw in zip(lines, parsed_rule_tags):
         pm = _POINTER_RE.match(ln)
         if pm:
             if pm.group(1).strip() == slug:
                 kept.append(ln)
             continue
-        rm = _RULE_LINE_RE.match(ln)
-        if rm and rm.group(1):
-            rtags = {slugify(x.strip(), 32) for x in rm.group(1).split(",") if x.strip()}
+        if rtags_raw is not None:
+            rtags = _expand_tag_set(rtags_raw, legacy_map, exact_slugs)
             if rtags and not (rtags & proj_tags):
                 hidden_rules += 1
                 continue

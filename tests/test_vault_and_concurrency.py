@@ -122,8 +122,34 @@ class ProjectAndScopeTests(VaultBase):
         long_repo = self.make_repo("longsvc")
         vault.register_project(self.root, long_slug, [long_repo], name="LongSvc", state_dir=self.state)
         vault.add_rule(self.root, "global", "Uzun slug kuralı yüklenmeli", tags=[long_slug], state_dir=self.state)
+        # Eski 32 karakter sinirinda kaydedilmis tekil (belirsiz olmayan) etiket de geriye donuk eslesmeli
+        kpath = self.root / "Kurallar.md"
+        kpath.write_text(
+            kpath.read_text(encoding="utf-8").rstrip("\n")
+            + "\n- **[2026-11-22]** {tags: very-long-service-name-with-suff} Eski 32kr kuralı yüklenmeli\n",
+            encoding="utf-8",
+        )
         res = vault.bootstrap_context(self.root, self.state, cwd=long_repo)
         self.assertIn("Uzun slug kuralı yüklenmeli", res["text"])
+        self.assertIn("Eski 32kr kuralı yüklenmeli", res["text"])
+
+        # 32 karakterlik ayni oneki paylasan iki farkli 36-kr proje birbirine sizdirmamali
+        s_api = "very-long-shared-prefix-service-api1"
+        s_web = "very-long-shared-prefix-service-web2"
+        r_api = self.make_repo("shared32-api")
+        r_web = self.make_repo("shared32-web")
+        vault.register_project(self.root, s_api, [r_api], state_dir=self.state)
+        vault.register_project(self.root, s_web, [r_web], state_dir=self.state)
+        vault.add_rule(self.root, "global", "Yalnız 36kr API1 kuralı", tags=[s_api], state_dir=self.state)
+        kpath.write_text(
+            kpath.read_text(encoding="utf-8").rstrip("\n")
+            + "\n- **[2026-11-22]** {tags: very-long-shared-prefix-service} Belirsiz 31kr kural sızmamalı\n",
+            encoding="utf-8",
+        )
+        self.assertIn("Yalnız 36kr API1 kuralı", vault.bootstrap_context(self.root, self.state, cwd=r_api)["text"])
+        web_txt = vault.bootstrap_context(self.root, self.state, cwd=r_web)["text"]
+        self.assertNotIn("Yalnız 36kr API1 kuralı", web_txt)
+        self.assertNotIn("Belirsiz 31kr kural sızmamalı", web_txt)
 
     def test_project_tags_and_global_rule_tag_filtering(self):
         vault.register_project(self.root, "order-service", [self.repo], tags=["Python", "FastAPI"],
