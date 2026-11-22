@@ -353,7 +353,7 @@ def _normalize_tags(tags: list[str] | None) -> list[str]:
         s = (t or "").strip()
         if not s:
             continue
-        norm = slugify(s, 24)
+        norm = slugify(s, 32)
         if norm not in seen:
             seen.add(norm)
             out.append(norm)
@@ -602,7 +602,7 @@ def _filter_global_rules(grules: str, root: Path, slug: str | None) -> str:
     if slug is None:
         return grules
     proj_info = config.get_project(root, slug) or {}
-    proj_tags = {slugify(t, 24) for t in (proj_info.get("tags") or []) if t} | {slugify(slug, 24)}
+    proj_tags = {slugify(t, 32) for t in (proj_info.get("tags") or []) if t} | {slug}
     kept: list[str] = []
     hidden_rules = 0
     for ln in grules.split("\n"):
@@ -613,7 +613,7 @@ def _filter_global_rules(grules: str, root: Path, slug: str | None) -> str:
             continue
         rm = _RULE_LINE_RE.match(ln)
         if rm and rm.group(1):
-            rtags = {slugify(x.strip(), 24) for x in rm.group(1).split(",") if x.strip()}
+            rtags = {slugify(x.strip(), 32) for x in rm.group(1).split(",") if x.strip()}
             if rtags and not (rtags & proj_tags):
                 hidden_rules += 1
                 continue
@@ -1012,33 +1012,48 @@ def _find_rule_line(lines: list[str], query_text: str) -> int:
     return idx
 
 
+def _iter_archive_ids(sess: _Session, current_month: str) -> list[str]:
+    found: list[str] = []
+    adir = sess.ctx.vault_root / "archive"
+    if adir.is_dir():
+        for p in sorted(adir.glob("*.md"), reverse=True):
+            rel = f"archive/{p.name}"
+            if sess.exists(rel):
+                found.append(rel)
+    cur = f"archive/{current_month}.md"
+    if cur not in found and sess.exists(cur):
+        found.insert(0, cur)
+    return found
+
+
 def _find_archived_removed_rule(sess: _Session, doc_id: str, query_text: str, now: datetime) -> tuple[str, str] | None:
-    month = now.strftime("%Y-%m")
-    arch_id = f"archive/{month}.md"
-    if not sess.exists(arch_id):
-        return None
     q = fold_tr(" ".join((query_text or "").split()))
     if not q:
         return None
     marker = f"<!-- kurallar: {doc_id} -->"
-    alines = sess.read(arch_id).split("\n")
-    matches: list[str] = []
-    for i, ln in enumerate(alines):
-        if ln.strip() == marker and i + 1 < len(alines):
-            m = _ARCHIVED_REMOVED_RE.match(alines[i + 1].strip())
-            if not m:
-                continue
-            rule_line = m.group(1)
-            rt = _rule_text(rule_line)
-            if rt == q or (len(q) >= 10 and rt and q in rt):
-                matches.append(rule_line)
-    if matches:
-        return arch_id, matches[-1]
+    for arch_id in _iter_archive_ids(sess, now.strftime("%Y-%m")):
+        alines = sess.read(arch_id).split("\n")
+        matches: list[str] = []
+        for i, ln in enumerate(alines):
+            if ln.strip() == marker and i + 1 < len(alines):
+                m = _ARCHIVED_REMOVED_RE.match(alines[i + 1].strip())
+                if not m:
+                    continue
+                rule_line = m.group(1)
+                rt = _rule_text(rule_line)
+                if rt == q or (len(q) >= 10 and rt and q in rt):
+                    matches.append(rule_line)
+        if matches:
+            return arch_id, matches[-1]
     return None
 
 
 def _archive_rule(sess: _Session, doc_id: str, old_line: str, note: str, now: datetime) -> str:
     month = now.strftime("%Y-%m")
+    entry_block = f"<!-- kurallar: {doc_id} -->\n- ~~{old_line.strip()}~~ *({note})*"
+    for prev_arch in _iter_archive_ids(sess, month):
+        if entry_block in sess.read(prev_arch):
+            return prev_arch
     arch_id = f"archive/{month}.md"
     if sess.exists(arch_id):
         existing = sess.read(arch_id)
@@ -1047,9 +1062,6 @@ def _archive_rule(sess: _Session, doc_id: str, old_line: str, note: str, now: da
             {"title": f"Arşiv {month}", "kind": "note", "status": "archived", "created_at": _iso(now)},
             f"# Arşiv {month}\n",
         )
-    entry_block = f"<!-- kurallar: {doc_id} -->\n- ~~{old_line.strip()}~~ *({note})*"
-    if entry_block in existing:
-        return arch_id
     sess.write(arch_id, existing.rstrip("\n") + "\n\n" + entry_block + "\n", "archive_rule")
     return arch_id
 
@@ -1233,6 +1245,7 @@ class _ThreadItem:
 
 _THREAD_LINE_RE = re.compile(r"^\s*-\s+\[\s*\]\s+(.*)$")
 _THREAD_TAG_RE = re.compile(r"\s*<!--\s*t:([a-z0-9_-]+)\s+h:([a-z0-9_-]+)\s*-->\s*$")
+_MD_FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 MANAGED_THREADS_HEADING = "## Ajan Açık Konuları"
 
 
@@ -1255,7 +1268,21 @@ def _split_threads_body(tb: str, default_title: str) -> tuple[str, str, list[_Th
     items: list[_ThreadItem] = []
     used_ids: set[str] = set()
     other_lines: list[str] = []
+    fence_char: str | None = None
+    fence_len = 0
     for ln in tb.split("\n"):
+        fm = _MD_FENCE_RE.match(ln)
+        if fm:
+            marker = fm.group(1)
+            if fence_char is None:
+                fence_char, fence_len = marker[0], len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_len:
+                fence_char, fence_len = None, 0
+            other_lines.append(ln)
+            continue
+        if fence_char is not None:
+            other_lines.append(ln)
+            continue
         s = ln.strip()
         m = _THREAD_LINE_RE.match(ln)
         if m:
@@ -1309,6 +1336,20 @@ def _archive_closed_threads(sess: _Session, slug: str, items: list[_ThreadItem],
                             tag: str, harness: str, now: datetime) -> str:
     month = now.strftime("%Y-%m")
     doc_id = f"archive/{month}.md"
+    proj_marker = f"<!-- proje: {slug} · kapanan-konular -->"
+    prior_texts = [sess.read(aid) for aid in _iter_archive_ids(sess, month)]
+    pending: list[str] = []
+    found_arch = doc_id
+    for it in items:
+        entry_line = f"- [x] {it.text} *(açan: {it.owner}, kapatan: {harness}, t:{it.id})*"
+        already_in = next((aid for aid, atxt in zip(_iter_archive_ids(sess, month), prior_texts)
+                           if proj_marker in atxt and entry_line in atxt), None)
+        if already_in is not None:
+            found_arch = already_in
+        else:
+            pending.append(entry_line)
+    if not pending:
+        return found_arch
     if sess.exists(doc_id):
         existing = sess.read(doc_id)
     else:
@@ -1317,15 +1358,14 @@ def _archive_closed_threads(sess: _Session, slug: str, items: list[_ThreadItem],
             f"# Arşiv {month}\n",
         )
     lines = [
-        f"<!-- proje: {slug} · kapanan-konular -->",
+        proj_marker,
         f"## {now.strftime('%Y-%m-%d %H:%M')} · Kapanan Konular · {tag}",
         "",
+        *pending,
     ]
-    for it in items:
-        lines.append(f"- [x] {it.text} *(açan: {it.owner}, kapatan: {harness}, t:{it.id})*")
     block = "\n".join(lines)
     sess.write(doc_id, existing.rstrip("\n") + "\n\n" + block + "\n", "archive_threads",
-               {"project": slug, "count": len(items)})
+               {"project": slug, "count": len(pending)})
     return doc_id
 
 
@@ -1339,7 +1379,7 @@ def _match_close_selector(items: list[_ThreadItem], sel: str) -> list[_ThreadIte
     txt_probe = fold_tr(" ".join(s.split()))
     if not txt_probe:
         return []
-    return [it for it in items if fold_tr(it.text) == txt_probe]
+    return [it for it in items if fold_tr(" ".join(it.text.split())) == txt_probe]
 
 
 def _plan_project_threads(sess: _Session, slug: str, proj_name: str, harness: str,
@@ -1437,8 +1477,11 @@ def _plan_project_threads(sess: _Session, slug: str, proj_name: str, harness: st
         else:
             final_items = remaining
 
+    composed_body = _compose_threads_body(h1, freeform_rest, final_items)
+    if composed_body.rstrip("\n") == tb.rstrip("\n"):
+        return old_ttext, old_ttext, closed_items, unmatched_close
     _touch(tmeta, now)
-    new_ttext = _meta_doc(tmeta, _compose_threads_body(h1, freeform_rest, final_items))
+    new_ttext = _meta_doc(tmeta, composed_body)
     return old_ttext, new_ttext, closed_items, unmatched_close
 
 
@@ -1551,7 +1594,7 @@ def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[
             while (
                 len(cards) > SESSION_MAX_CARDS
                 or (len(text) > SESSION_LIMIT and len(cards) > SESSION_MIN_CARDS)
-                or (len(text) > 12000 and len(cards) > 1)
+                or (len(text) > 12000 and len(cards) > SESSION_MIN_CARDS)
             ):
                 oldest = cards.pop()
                 archived.append(_archive_card(sess, slug, oldest, now))
@@ -1685,6 +1728,8 @@ def compact_receipts(vault_root, older_than_days: int = 14, project: str | None 
                     )
                 if str(smeta.get("trust") or "trusted") != "trusted":
                     raise VaultError(f"Güvenilmeyen özet dosyası güncellenemez: {summary_id}")
+                if str(smeta.get("kind") or "receipt") != "receipt" or str(smeta.get("status") or "active") != "active":
+                    raise VaultError(f"Arşivlenmiş veya makbuz olmayan özet dosyası güncellenemez: {summary_id}")
                 smeta = dict(smeta)
                 _touch(smeta, now)
             else:
@@ -1700,18 +1745,22 @@ def compact_receipts(vault_root, older_than_days: int = 14, project: str | None 
                 }
                 sbody = f"# Makbuz Özeti {ym} ({label})\n"
 
+            header_re = re.compile(r"^- \*\*[^*]+\*\* \(\[\[([^\]]+)\]\]\):")
             lines = sbody.split("\n")
             body_changed = False
             new_bullets: list[str] = []
             for it in items:
                 doc_id = it["doc_id"]
-                link_ref = f"[[{doc_id[:-3]}]]"
+                target_stem = doc_id[:-3]
+                link_ref = f"[[{target_stem}]]"
                 created_date = str(it["meta"].get("created_at") or "")[:10] or it["dt"].strftime("%Y-%m-%d")
                 session = str(it["meta"].get("session") or Path(doc_id).stem)
                 short_sum = _receipt_short_summary(it["body"])
                 bullet = f"- **{created_date} · {session}** ({link_ref}): {short_sum}"
-                marker = f"({link_ref}):"
-                matched_idx = next((i for i, ln in enumerate(lines) if marker in ln), None)
+                matched_idx = next(
+                    (i for i, ln in enumerate(lines) if (m := header_re.match(ln)) and m.group(1) == target_stem),
+                    None,
+                )
                 if matched_idx is not None:
                     if lines[matched_idx] != bullet:
                         lines[matched_idx] = bullet

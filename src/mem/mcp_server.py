@@ -297,7 +297,7 @@ class McpServer:
             return _text(vault.finish_session(
                 vr, target, _req(a, "summary"), open_threads=a.get("open_threads"), refs=a.get("refs"),
                 session_id=a.get("session_id"), harness=effective_harness, state_dir=sd,
-                close_threads=a.get("close_threads"), threads_mode=a.get("threads_mode") or "merge"))
+                close_threads=a.get("close_threads"), threads_mode=a.get("threads_mode")))
         raise KeyError(name)
 
     # --- JSON-RPC

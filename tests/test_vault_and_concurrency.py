@@ -1028,5 +1028,84 @@ class CliEndToEndTests(IsolatedCase):
         self.assertTrue(any("Kural dosyası okunamadı (projects/alpha/Kurallar.md)" in c["name"] for c in fail_checks))
 
 
+class Round2HardeningTests(VaultBase):
+    def test_fenced_checkboxes_untouched_and_noop_finish_skips_thread_rewrite(self):
+        tpath = self.root / "projects/order-service/Acik-Konular.md"
+        tpath.write_text(
+            "# OrderService — Açık Konular\n\n"
+            "Örnek şablon:\n\n"
+            "```markdown\n"
+            "- [ ] Şablon içindeki örnek madde\n"
+            "```\n\n"
+            "- [ ] Retry  failed jobs\n",
+            encoding="utf-8",
+        )
+        r1 = vault.finish_session(self.root, "order-service", "İlk tur", open_threads=["Yeni görev"],
+                                  session_id="s1", harness="claude", state_dir=self.state)
+        self.assertEqual(r1["status"], "recorded")
+        t1 = tpath.read_text(encoding="utf-8")
+        self.assertIn("```markdown\n- [ ] Şablon içindeki örnek madde\n```", t1)
+        self.assertNotIn("Şablon içindeki örnek madde <!--", t1)
+        self.assertIn("Retry  failed jobs <!--", t1)
+
+        # Degisiklik yokken ikinci finish Acik-Konular.md dosyasini yeniden yazmamali (updated_at degismez)
+        bak_dir = self.state / "backups"
+        bak_before = len(list(bak_dir.rglob("*Acik-Konular.md*.bak"))) if bak_dir.exists() else 0
+        vault.finish_session(self.root, "order-service", "İkinci tur özet", open_threads=["Yeni görev"],
+                             session_id="s2", harness="claude", state_dir=self.state)
+        self.assertEqual(tpath.read_text(encoding="utf-8"), t1)
+        bak_after = len(list(bak_dir.rglob("*Acik-Konular.md*.bak"))) if bak_dir.exists() else 0
+        self.assertEqual(bak_after, bak_before)
+
+        # Cift bosluklu legacy madde tek bosluklu tam metin secicisiyle kapanir
+        rc = vault.finish_session(self.root, "order-service", "Kapatma", close_threads=["Retry failed jobs"],
+                                  session_id="s3", harness="codex", state_dir=self.state)
+        self.assertEqual(len(rc["closed_threads"]), 1)
+        self.assertNotIn("Retry  failed jobs", tpath.read_text(encoding="utf-8"))
+
+    def test_long_project_slugs_distinct_and_compact_summary_guards(self):
+        r_api = self.make_repo("long-api")
+        r_web = self.make_repo("long-web")
+        slug_api = "abcdefghijklmnopqrstuvwx-api"
+        slug_web = "abcdefghijklmnopqrstuvwx-web"
+        vault.register_project(self.root, slug_api, [r_api], state_dir=self.state)
+        vault.register_project(self.root, slug_web, [r_web], state_dir=self.state)
+        vault.add_rule(self.root, "global", "Yalnız API uzun slug kuralı", tags=[slug_api], state_dir=self.state)
+        b_api = vault.bootstrap_context(self.root, self.state, cwd=r_api)
+        b_web = vault.bootstrap_context(self.root, self.state, cwd=r_web)
+        self.assertIn("Yalnız API uzun slug kuralı", b_api["text"])
+        self.assertNotIn("Yalnız API uzun slug kuralı", b_web["text"])
+
+        # compact_receipts: arsivlenmis ozet dosyasi kaynaklari yutmamali + baslik disi link eslesmemeli
+        old_dt = datetime(2025, 5, 10, 12, 0)
+        with mock.patch.object(vault, "_now", return_value=old_dt):
+            ra = vault.finish_session(self.root, "order-service", "Özet A ilk", session_id="sa",
+                                      harness="claude", state_dir=self.state)
+            rb = vault.finish_session(self.root, "order-service",
+                                      f"Özet B referans ([[{ra['receipt'][:-3]}]]): detay",
+                                      session_id="sb", harness="claude", state_dir=self.state)
+        vault.compact_receipts(self.root, older_than_days=14, project="order-service", state_dir=self.state)
+        sum_path = self.root / "receipts/2025-05/order-service-ozet.md"
+        # A makbuzunu guncelleyip yeniden sikistirinca B'nin satiri ezilmemeli
+        with mock.patch.object(vault, "_now", return_value=old_dt):
+            vault.finish_session(self.root, "order-service", "Özet A güncel", session_id="sa",
+                                 harness="claude", state_dir=self.state)
+        vault.compact_receipts(self.root, older_than_days=14, project="order-service", state_dir=self.state)
+        stext = sum_path.read_text(encoding="utf-8")
+        self.assertIn("Özet A güncel", stext)
+        self.assertIn("Özet B referans", stext)
+
+        # Ozet dosyasi status: archived yapilirsa compact_receipts hata vermeli
+        smeta, sbody = parse_markdown(stext)
+        smeta["status"] = "archived"
+        from mem.frontmatter import dump_markdown
+        sum_path.write_text(dump_markdown(smeta, sbody), encoding="utf-8")
+        with mock.patch.object(vault, "_now", return_value=old_dt):
+            vault.finish_session(self.root, "order-service", "Özet C", session_id="sc",
+                                 harness="claude", state_dir=self.state)
+        with self.assertRaises(vault.VaultError):
+            vault.compact_receipts(self.root, older_than_days=14, project="order-service", state_dir=self.state)
+
+
 if __name__ == "__main__":
     unittest.main()
