@@ -219,8 +219,11 @@ class McpServer:
             return _text(f"ConcurrencyConflictError: {exc} (güncel sha256: {exc.current_sha256})", True)
         except PathTraversalError as exc:
             return _text(f"PathTraversalError: {exc}", True)
-        except (vault.VaultError, ValueError, TimeoutError, OSError, TypeError, AttributeError, KeyError) as exc:
-            return _text(f"{type(exc).__name__}: {exc}", True)
+        except Exception as exc:  # noqa: BLE001 - arac hatalari JSON-RPC -32603 yerine isError donmeli
+            detail = str(exc).strip() or repr(exc)
+            if not isinstance(exc, (vault.VaultError, ValueError, TimeoutError, OSError, TypeError, AttributeError, KeyError)):
+                print(f"mem mcp arac hatasi: {type(exc).__name__}: {detail}", file=sys.stderr)
+            return _text(f"{type(exc).__name__}: {detail}", True)
 
     def _call_tool(self, name: str, a: dict) -> dict:
         sd = self.state_dir
@@ -496,6 +499,8 @@ def serve(server: McpServer, inp, out) -> None:
 def run_stdio(vault_root, state_dir=None, vault_scope: bool = False, advisor_mode: str | None = None,
               default_harness: str | None = None) -> int:
     """Gercek stdio: stdout ikili ve yalniz protokol; sapan print'ler stderr'e yonlendirilir."""
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     # Sunucu once kurulur: gecersiz advisor istegi (ör. work + gemini) akislara dokunmadan ValueError verir.
     server = McpServer(vault_root, state_dir, vault_scope=vault_scope, advisor_mode=advisor_mode,
                        default_harness=default_harness)

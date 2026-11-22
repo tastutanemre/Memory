@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
 import posixpath
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -19,6 +21,8 @@ from .lock import (
     ConcurrencyConflictError,
     PathTraversalError,
     VaultLock,
+    _fs_path,
+    atomic_write_bytes,
     atomic_write_text,
     resolve_in_vault,
     sha256_bytes,
@@ -117,6 +121,13 @@ def _ctx(vault_root, state_dir=None) -> _Ctx:
     return _Ctx(root, sdir, mode, meta.get("profile") or "default")
 
 
+def _backup_dir_for_doc(state_dir: Path, doc_id: str) -> Path:
+    """MAX_PATH sinirini asmamak icin yedek klasor adini <= 39 karakterde sabitler."""
+    digest = hashlib.sha256(doc_id.encode("utf-8")).hexdigest()[:10]
+    stem = doc_id[:-3] if doc_id.lower().endswith(".md") else doc_id
+    return state_dir / "backups" / f"{slugify(stem, 28)}-{digest}"
+
+
 class _Session:
     """Kilit + veritabani baglantisi; yazma yardimcilari. Ic ice kullanilmaz."""
 
@@ -125,6 +136,8 @@ class _Session:
         self.actor = actor
         self._lock = VaultLock(ctx.state_dir / "writer.lock")
         self.conn = None
+        self._tx_snapshots: dict[str, bytes | None] | None = None
+        self._tx_events: list[tuple] | None = None
 
     def __enter__(self):
         self._lock.acquire()
@@ -143,22 +156,72 @@ class _Session:
             self._lock.release()
         return False
 
+    @contextmanager
+    def transaction(self):
+        """Cok dosyali yazmalarda hata halinde tum degisiklikleri ve indeksi geri alir."""
+        if self._tx_snapshots is not None:
+            yield
+            return
+        self._tx_snapshots = {}
+        self._tx_events = []
+        try:
+            yield
+        except BaseException:
+            try:
+                for doc_id, orig in reversed(list(self._tx_snapshots.items())):
+                    full = self.path(doc_id)
+                    if orig is None:
+                        try:
+                            os.unlink(_fs_path(full))
+                        except FileNotFoundError:
+                            pass
+                    else:
+                        atomic_write_bytes(full, orig, backup_dir=None)
+                try:
+                    store.sync_vault(self.conn, self.ctx.vault_root)
+                except Exception:  # noqa: BLE001
+                    pass
+            finally:
+                self._tx_snapshots = None
+                self._tx_events = None
+            raise
+        else:
+            try:
+                for action, doc_id, sha, actor, detail in self._tx_events:
+                    store.log_event(self.conn, action, doc_id, sha, actor, detail)
+            finally:
+                self._tx_snapshots = None
+                self._tx_events = None
+
     def path(self, doc_id: str) -> Path:
         return resolve_in_vault(self.ctx.vault_root, doc_id)
 
     def exists(self, doc_id: str) -> bool:
-        return self.path(doc_id).exists()
+        return os.path.exists(_fs_path(self.path(doc_id)))
 
     def read(self, doc_id: str) -> str:
-        return self.path(doc_id).read_text(encoding="utf-8").replace("\r\n", "\n")
+        return Path(_fs_path(self.path(doc_id))).read_text(encoding="utf-8").replace("\r\n", "\n")
 
     def read_bytes(self, doc_id: str) -> bytes:
-        return self.path(doc_id).read_bytes()
+        return Path(_fs_path(self.path(doc_id))).read_bytes()
+
+    def snapshot(self, doc_id: str) -> None:
+        """Aktif transaction icinde dosyanin yazma oncesi ham baytlarini saklar."""
+        if self._tx_snapshots is not None and doc_id not in self._tx_snapshots:
+            fs_full = _fs_path(self.path(doc_id))
+            self._tx_snapshots[doc_id] = Path(fs_full).read_bytes() if os.path.exists(fs_full) else None
+
+    def record_event(self, action: str, doc_id: str, sha: str | None = None, detail: dict | None = None) -> None:
+        if self._tx_events is not None:
+            self._tx_events.append((action, doc_id, sha, self.actor, detail))
+        else:
+            store.log_event(self.conn, action, doc_id, sha, self.actor, detail)
 
     def write(self, doc_id: str, text: str, action: str, detail: dict | None = None) -> str:
-        backup = self.ctx.state_dir / "backups" / doc_id.replace("/", "__")
+        self.snapshot(doc_id)
+        backup = _backup_dir_for_doc(self.ctx.state_dir, doc_id)
         sha = atomic_write_text(self.path(doc_id), text, backup_dir=backup)
-        store.log_event(self.conn, action, doc_id, sha, self.actor, detail)
+        self.record_event(action, doc_id, sha, detail)
         return sha
 
     def sync(self) -> dict:
@@ -375,41 +438,42 @@ def register_project(vault_root, slug: str, repo_roots, name: str | None = None,
     with _Session(ctx) as sess:
         desc, _ = _shield_all(sess, [description])
         desc = desc[0]
-        projects = config.load_projects(ctx.vault_root)
-        existing = next((p for p in projects if p["slug"] == slug), None)
-        if existing is None:
-            entry = {"slug": slug, "name": name or slug, "roots": roots, "description": desc}
-            if norm_tags is not None:
-                entry["tags"] = norm_tags
-            projects.append(entry)
-            action = "created"
-        else:
-            entry = existing
-            for r in roots:
-                if r.lower() not in [x.lower() for x in entry.get("roots", [])]:
-                    entry.setdefault("roots", []).append(r)
-            if name:
-                entry["name"] = name
-            if desc:
-                entry["description"] = desc
-            if norm_tags is not None:
-                entry["tags"] = norm_tags
-            action = "updated"
-        config.save_projects(ctx.vault_root, projects)
-        store.log_event(sess.conn, "project_add", "projects.json", None, sess.actor,
-                        {"slug": slug, "roots": entry["roots"]})
-        pname = entry["name"]
-        for doc_id, text in _project_files(slug, pname, entry.get("description", ""), _iso(now)).items():
-            if not sess.exists(doc_id):
-                sess.write(doc_id, text, "project_init")
-        (ctx.vault_root / "projects" / slug / "kararlar").mkdir(parents=True, exist_ok=True)
-        pointer = f"- [kapsam: {slug}] [[projects/{slug}/Kurallar|{pname} kuralları]]"
-        rules = sess.read("Kurallar.md")
-        if f"[[projects/{slug}/Kurallar|" not in rules:
-            sess.write("Kurallar.md", rules.rstrip("\n") + "\n" + pointer + "\n", "rule_pointer")
-        sess.sync()
-        _refresh_hub(sess, slug)
-        sess.sync()
+        with sess.transaction():
+            projects = config.load_projects(ctx.vault_root)
+            existing = next((p for p in projects if p["slug"] == slug), None)
+            if existing is None:
+                entry = {"slug": slug, "name": name or slug, "roots": roots, "description": desc}
+                if norm_tags is not None:
+                    entry["tags"] = norm_tags
+                projects.append(entry)
+                action = "created"
+            else:
+                entry = existing
+                for r in roots:
+                    if r.lower() not in [x.lower() for x in entry.get("roots", [])]:
+                        entry.setdefault("roots", []).append(r)
+                if name:
+                    entry["name"] = name
+                if desc:
+                    entry["description"] = desc
+                if norm_tags is not None:
+                    entry["tags"] = norm_tags
+                action = "updated"
+            sess.snapshot("projects.json")
+            config.save_projects(ctx.vault_root, projects)
+            sess.record_event("project_add", "projects.json", detail={"slug": slug, "roots": entry["roots"]})
+            pname = entry["name"]
+            for doc_id, text in _project_files(slug, pname, entry.get("description", ""), _iso(now)).items():
+                if not sess.exists(doc_id):
+                    sess.write(doc_id, text, "project_init")
+            (ctx.vault_root / "projects" / slug / "kararlar").mkdir(parents=True, exist_ok=True)
+            pointer = f"- [kapsam: {slug}] [[projects/{slug}/Kurallar|{pname} kuralları]]"
+            rules = sess.read("Kurallar.md")
+            if f"[[projects/{slug}/Kurallar|" not in rules:
+                sess.write("Kurallar.md", rules.rstrip("\n") + "\n" + pointer + "\n", "rule_pointer")
+            sess.sync()
+            _refresh_hub(sess, slug)
+            sess.sync()
     return {"status": action, "slug": slug, "name": pname, "roots": entry["roots"], "tags": entry.get("tags", [])}
 
 
@@ -925,24 +989,26 @@ def _write_decision(sess: _Session, ctx: _Ctx, slug: str | None, folder: str, no
         pname = (config.get_project(ctx.vault_root, slug) or {}).get("name", slug)
         hub_link = project_hub_doc_id(ctx.vault_root, slug, pname)[:-3]
         lines += ["", f"Proje: [[{hub_link}|{pname} genel bakış]]"]
-    sha = sess.write(doc_id, _meta_doc(meta, "\n".join(lines) + "\n"), "decide", {"supersedes": old_ids})
 
-    for old in old_ids:
-        otext = sess.read(old)
-        ometa, obody = parse_markdown(otext)
-        ometa["status"] = "superseded"
-        ometa["superseded_by"] = doc_id
-        _touch(ometa, now)
-        status_line = f"**Durum:** Yerine geçen: [[{doc_id[:-3]}|{title.replace('|', '/')}]]"
-        if re.search(r"^\*\*Durum:\*\*.*$", obody, re.M):
-            obody = re.sub(r"^\*\*Durum:\*\*.*$", lambda _m: status_line, obody, count=1, flags=re.M)
-        else:
-            obody = obody.rstrip("\n") + "\n\n" + status_line + "\n"
-        sess.write(old, _meta_doc(ometa, obody), "supersede", {"by": doc_id})
-    sess.sync()
-    if slug:
-        _refresh_hub(sess, slug)
+    old_docs = [(old, *parse_markdown(sess.read(old))) for old in old_ids]
+    with sess.transaction():
+        sha = sess.write(doc_id, _meta_doc(meta, "\n".join(lines) + "\n"), "decide", {"supersedes": old_ids})
+
+        for old, ometa, obody in old_docs:
+            ometa = dict(ometa)
+            ometa["status"] = "superseded"
+            ometa["superseded_by"] = doc_id
+            _touch(ometa, now)
+            status_line = f"**Durum:** Yerine geçen: [[{doc_id[:-3]}|{title.replace('|', '/')}]]"
+            if re.search(r"^\*\*Durum:\*\*.*$", obody, re.M):
+                obody = re.sub(r"^\*\*Durum:\*\*.*$", lambda _m: status_line, obody, count=1, flags=re.M)
+            else:
+                obody = obody.rstrip("\n") + "\n\n" + status_line + "\n"
+            sess.write(old, _meta_doc(ometa, obody), "supersede", {"by": doc_id})
         sess.sync()
+        if slug:
+            _refresh_hub(sess, slug)
+            sess.sync()
     return {"status": "created", "path": doc_id, "sha256": sha, "superseded": old_ids, "dlp_categories": cats}
 
 
@@ -1150,9 +1216,10 @@ def add_rule(vault_root, scope: str, rule_text: str = "", reason: str = "", stat
             old_line = lines[idx]
             new_lines = lines[:idx] + lines[idx + 1 :]
             new_text = "\n".join(new_lines).rstrip("\n") + "\n"
-            arch_id = _archive_rule(sess, doc_id, old_line, f"kaldırıldı: {rsn or 'remove'}", now)
-            sha = sess.write(doc_id, new_text, "rule_remove")
-            sess.sync()
+            with sess.transaction():
+                arch_id = _archive_rule(sess, doc_id, old_line, f"kaldırıldı: {rsn or 'remove'}", now)
+                sha = sess.write(doc_id, new_text, "rule_remove")
+                sess.sync()
             return {"status": "removed", "path": doc_id, "removed_line": old_line, "archived": [arch_id],
                     "sha256": sha, "dlp_categories": cats}
 
@@ -1177,11 +1244,12 @@ def add_rule(vault_root, scope: str, rule_text: str = "", reason: str = "", stat
         key = fold_tr(text)
         if any(_rule_text(ln) == key for ln in rem_lines):
             return {"status": "duplicate", "path": doc_id, "line": line}
-        if superseded_line is not None:
-            arch_ids.append(_archive_rule(sess, doc_id, superseded_line, f"yerine: {text}", now))
-        updated = "\n".join(rem_lines).rstrip("\n") + "\n" + line + "\n"
-        sha = sess.write(doc_id, updated, "rule")
-        sess.sync()
+        with sess.transaction():
+            if superseded_line is not None:
+                arch_ids.append(_archive_rule(sess, doc_id, superseded_line, f"yerine: {text}", now))
+            updated = "\n".join(rem_lines).rstrip("\n") + "\n" + line + "\n"
+            sha = sess.write(doc_id, updated, "rule")
+            sess.sync()
     out = {"status": "added", "path": doc_id, "line": line, "sha256": sha, "dlp_categories": cats}
     if superseded_line is not None:
         out["superseded_line"] = superseded_line
@@ -1612,54 +1680,55 @@ def finish_session(vault_root, cwd_or_project, summary: str, open_threads: list[
                  "harness": harness, "session": tag, "event_hash": event_hash,
                  "created_at": created, "updated_at": _iso(now), "refs": refs_c}
         new_receipt = _meta_doc(rmeta, "\n".join(rbody) + "\n")
-        if not (sess.exists(receipt_id) and sess.read(receipt_id) == new_receipt):
-            sess.write(receipt_id, new_receipt, "finish", {"session": tag})
-        result = {"status": "recorded", "project": slug, "receipt": receipt_id, "session_tag": tag,
-                  "archived": [], "closed_threads": [], "dlp_categories": cats}
+        with sess.transaction():
+            if not (sess.exists(receipt_id) and sess.read(receipt_id) == new_receipt):
+                sess.write(receipt_id, new_receipt, "finish", {"session": tag})
+            result = {"status": "recorded", "project": slug, "receipt": receipt_id, "session_tag": tag,
+                      "archived": [], "closed_threads": [], "dlp_categories": cats}
 
-        if slug:
-            son_id = f"projects/{slug}/Son-Oturum.md"
-            smeta, sbody = parse_markdown(sess.read(son_id))
-            header, cards = _split_cards(sbody)
-            card_lines = [f"## {now.strftime('%Y-%m-%d %H:%M')} · {tag}", "", _escape_heads(summary_c)]
-            if threads_c:
-                card_lines += ["", "**Açık konular:**"] + [f"- {_escape_heads(t)}" for t in threads_c]
-            if refs_c:
-                card_lines += ["", "**Kaynaklar:** " + ", ".join(refs_c)]
-            card = "\n".join(card_lines)
-            idx = next((i for i, c in enumerate(cards) if c.split("\n", 1)[0].endswith(f" · {tag}")), None)
-            if idx is None:
-                cards.insert(0, card)
-            else:
-                old_body = cards[idx].split("\n", 1)[1] if "\n" in cards[idx] else ""
-                if old_body != card.split("\n", 1)[1]:
-                    cards[idx] = card
-            _touch(smeta, now)
-            text = _compose_session(smeta, header, cards)
-            archived: list[str] = []
-            while (
-                len(cards) > SESSION_MAX_CARDS
-                or (len(text) > SESSION_LIMIT and len(cards) > SESSION_MIN_CARDS)
-                or (len(text) > 12000 and len(cards) > SESSION_MIN_CARDS)
-            ):
-                oldest = cards.pop()
-                archived.append(_archive_card(sess, slug, oldest, now))
+            if slug:
+                son_id = f"projects/{slug}/Son-Oturum.md"
+                smeta, sbody = parse_markdown(sess.read(son_id))
+                header, cards = _split_cards(sbody)
+                card_lines = [f"## {now.strftime('%Y-%m-%d %H:%M')} · {tag}", "", _escape_heads(summary_c)]
+                if threads_c:
+                    card_lines += ["", "**Açık konular:**"] + [f"- {_escape_heads(t)}" for t in threads_c]
+                if refs_c:
+                    card_lines += ["", "**Kaynaklar:** " + ", ".join(refs_c)]
+                card = "\n".join(card_lines)
+                idx = next((i for i, c in enumerate(cards) if c.split("\n", 1)[0].endswith(f" · {tag}")), None)
+                if idx is None:
+                    cards.insert(0, card)
+                else:
+                    old_body = cards[idx].split("\n", 1)[1] if "\n" in cards[idx] else ""
+                    if old_body != card.split("\n", 1)[1]:
+                        cards[idx] = card
+                _touch(smeta, now)
                 text = _compose_session(smeta, header, cards)
-            old_text = sess.read(son_id)
-            if text != old_text:
-                sess.write(son_id, text, "session_card", {"session": tag, "archived": len(archived)})
+                archived: list[str] = []
+                while (
+                    len(cards) > SESSION_MAX_CARDS
+                    or (len(text) > SESSION_LIMIT and len(cards) > SESSION_MIN_CARDS)
+                    or (len(text) > 12000 and len(cards) > SESSION_MIN_CARDS)
+                ):
+                    oldest = cards.pop()
+                    archived.append(_archive_card(sess, slug, oldest, now))
+                    text = _compose_session(smeta, header, cards)
+                old_text = sess.read(son_id)
+                if text != old_text:
+                    sess.write(son_id, text, "session_card", {"session": tag, "archived": len(archived)})
 
-            if thread_plan is not None:
-                old_ttext, new_ttext, closed_items, unmatched_close = thread_plan
-                if closed_items:
-                    archived.append(_archive_closed_threads(sess, slug, closed_items, tag, harness, now))
-                if new_ttext != old_ttext:
-                    sess.write(f"projects/{slug}/Acik-Konular.md", new_ttext, "threads")
-                result["closed_threads"] = [it.id for it in closed_items]
-                if unmatched_close:
-                    result["unmatched_close"] = unmatched_close
-            result["archived"] = sorted(set(archived))
-        sess.sync()
+                if thread_plan is not None:
+                    old_ttext, new_ttext, closed_items, unmatched_close = thread_plan
+                    if closed_items:
+                        archived.append(_archive_closed_threads(sess, slug, closed_items, tag, harness, now))
+                    if new_ttext != old_ttext:
+                        sess.write(f"projects/{slug}/Acik-Konular.md", new_ttext, "threads")
+                    result["closed_threads"] = [it.id for it in closed_items]
+                    if unmatched_close:
+                        result["unmatched_close"] = unmatched_close
+                result["archived"] = sorted(set(archived))
+            sess.sync()
     return result
 
 
@@ -1753,84 +1822,85 @@ def compact_receipts(vault_root, older_than_days: int = 14, project: str | None 
 
         compacted = 0
         summary_ids: set[str] = set()
-        for (ym, proj_slug), items in sorted(groups.items(), key=lambda kv: (kv[0][0], "" if kv[0][1] is None else kv[0][1])):
-            if proj_slug is None:
-                summary_id = f"receipts/{ym}/_vault-ozet.md"
-                label = "genel (kasa)"
-            else:
-                summary_id = f"receipts/{ym}/{proj_slug}-ozet.md"
-                label = proj_slug
-            summary_exists = sess.exists(summary_id)
-            if len(items) < 2 and not summary_exists:
-                continue
-            items.sort(key=lambda x: (x["dt"], x["doc_id"]))
-            if summary_exists:
-                smeta, sbody = parse_markdown(sess.read(summary_id))
-                existing_proj = smeta.get("project")
-                existing_proj = existing_proj.strip() if isinstance(existing_proj, str) and existing_proj.strip() else None
-                if existing_proj != proj_slug:
-                    raise VaultError(
-                        f"Özet dosyası proje sahibi uyuşmuyor ({summary_id}): beklenen={proj_slug!r}, mevcut={existing_proj!r}"
-                    )
-                if str(smeta.get("trust") or "trusted") != "trusted":
-                    raise VaultError(f"Güvenilmeyen özet dosyası güncellenemez: {summary_id}")
-                if str(smeta.get("kind") or "receipt") != "receipt" or str(smeta.get("status") or "active") != "active":
-                    raise VaultError(f"Arşivlenmiş veya makbuz olmayan özet dosyası güncellenemez: {summary_id}")
-                smeta = dict(smeta)
-                _touch(smeta, now)
-            else:
-                smeta = {
-                    "title": f"Makbuz Özeti {ym} ({label})",
-                    "kind": "receipt",
-                    "project": proj_slug,
-                    "status": "active",
-                    "trust": "trusted",
-                    "compacted_summary": True,
-                    "created_at": _iso(now),
-                    "updated_at": _iso(now),
-                }
-                sbody = f"# Makbuz Özeti {ym} ({label})\n"
-
-            header_re = re.compile(r"^- \*\*[^*]+\*\* \(\[\[([^\]]+)\]\]\):")
-            lines = sbody.split("\n")
-            body_changed = False
-            new_bullets: list[str] = []
-            for it in items:
-                doc_id = it["doc_id"]
-                target_stem = doc_id[:-3]
-                link_ref = f"[[{target_stem}]]"
-                created_date = str(it["meta"].get("created_at") or "")[:10] or it["dt"].strftime("%Y-%m-%d")
-                session = str(it["meta"].get("session") or Path(doc_id).stem)
-                short_sum = _receipt_short_summary(it["body"])
-                bullet = f"- **{created_date} · {session}** ({link_ref}): {short_sum}"
-                matched_idx = next(
-                    (i for i, ln in enumerate(lines) if (m := header_re.match(ln)) and m.group(1) == target_stem),
-                    None,
-                )
-                if matched_idx is not None:
-                    if lines[matched_idx] != bullet:
-                        lines[matched_idx] = bullet
-                        body_changed = True
+        with sess.transaction():
+            for (ym, proj_slug), items in sorted(groups.items(), key=lambda kv: (kv[0][0], "" if kv[0][1] is None else kv[0][1])):
+                if proj_slug is None:
+                    summary_id = f"receipts/{ym}/_vault-ozet.md"
+                    label = "genel (kasa)"
                 else:
-                    new_bullets.append(bullet)
+                    summary_id = f"receipts/{ym}/{proj_slug}-ozet.md"
+                    label = proj_slug
+                summary_exists = sess.exists(summary_id)
+                if len(items) < 2 and not summary_exists:
+                    continue
+                items.sort(key=lambda x: (x["dt"], x["doc_id"]))
+                if summary_exists:
+                    smeta, sbody = parse_markdown(sess.read(summary_id))
+                    existing_proj = smeta.get("project")
+                    existing_proj = existing_proj.strip() if isinstance(existing_proj, str) and existing_proj.strip() else None
+                    if existing_proj != proj_slug:
+                        raise VaultError(
+                            f"Özet dosyası proje sahibi uyuşmuyor ({summary_id}): beklenen={proj_slug!r}, mevcut={existing_proj!r}"
+                        )
+                    if str(smeta.get("trust") or "trusted") != "trusted":
+                        raise VaultError(f"Güvenilmeyen özet dosyası güncellenemez: {summary_id}")
+                    if str(smeta.get("kind") or "receipt") != "receipt" or str(smeta.get("status") or "active") != "active":
+                        raise VaultError(f"Arşivlenmiş veya makbuz olmayan özet dosyası güncellenemez: {summary_id}")
+                    smeta = dict(smeta)
+                    _touch(smeta, now)
+                else:
+                    smeta = {
+                        "title": f"Makbuz Özeti {ym} ({label})",
+                        "kind": "receipt",
+                        "project": proj_slug,
+                        "status": "active",
+                        "trust": "trusted",
+                        "compacted_summary": True,
+                        "created_at": _iso(now),
+                        "updated_at": _iso(now),
+                    }
+                    sbody = f"# Makbuz Özeti {ym} ({label})\n"
 
-            if not dry_run:
-                if body_changed or new_bullets:
-                    merged_body = "\n".join(lines).rstrip("\n")
-                    if new_bullets:
-                        merged_body = merged_body + "\n\n" + "\n".join(new_bullets)
-                    merged_body += "\n"
-                    sess.write(summary_id, _meta_doc(smeta, merged_body), "compact_summary",
-                               {"count": len(new_bullets), "updated": body_changed})
+                header_re = re.compile(r"^- \*\*[^*]+\*\* \(\[\[([^\]]+)\]\]\):")
+                lines = sbody.split("\n")
+                body_changed = False
+                new_bullets: list[str] = []
                 for it in items:
-                    imeta = it["meta"]
-                    imeta["status"] = "archived"
-                    imeta["compacted_into"] = summary_id
-                    _touch(imeta, now)
-                    sess.write(it["doc_id"], _meta_doc(imeta, it["body"]), "compact_receipt",
-                               {"summary": summary_id})
-            compacted += len(items)
-            summary_ids.add(summary_id)
-        if not dry_run and compacted > 0:
-            sess.sync()
+                    doc_id = it["doc_id"]
+                    target_stem = doc_id[:-3]
+                    link_ref = f"[[{target_stem}]]"
+                    created_date = str(it["meta"].get("created_at") or "")[:10] or it["dt"].strftime("%Y-%m-%d")
+                    session = str(it["meta"].get("session") or Path(doc_id).stem)
+                    short_sum = _receipt_short_summary(it["body"])
+                    bullet = f"- **{created_date} · {session}** ({link_ref}): {short_sum}"
+                    matched_idx = next(
+                        (i for i, ln in enumerate(lines) if (m := header_re.match(ln)) and m.group(1) == target_stem),
+                        None,
+                    )
+                    if matched_idx is not None:
+                        if lines[matched_idx] != bullet:
+                            lines[matched_idx] = bullet
+                            body_changed = True
+                    else:
+                        new_bullets.append(bullet)
+
+                if not dry_run:
+                    if body_changed or new_bullets:
+                        merged_body = "\n".join(lines).rstrip("\n")
+                        if new_bullets:
+                            merged_body = merged_body + "\n\n" + "\n".join(new_bullets)
+                        merged_body += "\n"
+                        sess.write(summary_id, _meta_doc(smeta, merged_body), "compact_summary",
+                                   {"count": len(new_bullets), "updated": body_changed})
+                    for it in items:
+                        imeta = it["meta"]
+                        imeta["status"] = "archived"
+                        imeta["compacted_into"] = summary_id
+                        _touch(imeta, now)
+                        sess.write(it["doc_id"], _meta_doc(imeta, it["body"]), "compact_receipt",
+                                   {"summary": summary_id})
+                compacted += len(items)
+                summary_ids.add(summary_id)
+            if not dry_run and compacted > 0:
+                sess.sync()
     return {"status": "ok", "dry_run": dry_run, "compacted": compacted, "summaries": sorted(summary_ids)}

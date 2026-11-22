@@ -1133,5 +1133,165 @@ class Round2HardeningTests(VaultBase):
             vault.compact_receipts(self.root, older_than_days=14, project="order-service", state_dir=self.state)
 
 
+class Pr4HardeningTests(VaultBase):
+    def test_long_title_adr_supersede_backup_path_and_success(self):
+        title1 = "a" * 60 + " ilk uzun mimari karar"
+        title2 = "b" * 60 + " ikinci uzun mimari karar"
+        first = vault.record_decision(
+            self.root, "order-service", title1, "İlk uzun karar metni", state_dir=self.state
+        )
+        self.assertEqual(first["status"], "created")
+        second = vault.record_decision(
+            self.root, "order-service", title2, "İkinci uzun karar metni",
+            supersedes=[first["path"]], state_dir=self.state,
+        )
+        self.assertEqual(second["status"], "created")
+        self.assertEqual(second["superseded"], [first["path"]])
+        old_meta, _ = parse_markdown((self.root / first["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(old_meta["status"], "superseded")
+        baks = list((self.state / "backups").rglob("*.bak"))
+        self.assertTrue(baks)
+        for b in baks:
+            self.assertLess(len(str(b)), 220, f"Yedek yolu cok uzun ({len(str(b))}): {b}")
+
+    def test_write_decision_rollback_on_supersede_failure_and_clean_retry(self):
+        old = vault.record_decision(
+            self.root, "order-service", "Eski karar", "Eski metin", state_dir=self.state
+        )
+        orig_write = vault._Session.write
+
+        def fail_supersede(sess_self, doc_id, content, action, detail=None):
+            if doc_id == old["path"]:
+                raise OSError("disk hatasi")
+            return orig_write(sess_self, doc_id, content, action, detail)
+
+        with mock.patch.object(vault._Session, "write", fail_supersede):
+            with self.assertRaises(OSError):
+                vault.record_decision(
+                    self.root, "order-service", "Yeni karar", "Yeni metin",
+                    supersedes=[old["path"]], state_dir=self.state,
+                )
+
+        karar_files = sorted(
+            p.relative_to(self.root).as_posix()
+            for p in (self.root / "projects/order-service/kararlar").glob("*.md")
+        )
+        self.assertEqual(karar_files, [old["path"]])
+        old_meta, _ = parse_markdown((self.root / old["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(old_meta["status"], "active")
+        self.assertNotIn("superseded_by", old_meta)
+
+        res = vault.record_decision(
+            self.root, "order-service", "Yeni karar", "Yeni metin",
+            supersedes=[old["path"]], state_dir=self.state,
+        )
+        self.assertEqual(res["status"], "created")
+        self.assertFalse(res["path"].endswith("-2.md"))
+        old_meta2, _ = parse_markdown((self.root / old["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(old_meta2["status"], "superseded")
+
+    def test_atomic_write_and_read_retry_exceeding_max_path(self):
+        import shutil
+        from pathlib import Path
+        from mem.lock import _fs_path, read_text_retry
+
+        base_long = self.tmp / ("d" * 60)
+        deep = base_long / ("e" * 60) / ("f" * 60) / ("g" * 60)
+        target = deep / ("long_note_name_" + "x" * 45 + ".md")
+        self.assertGreater(len(os.path.abspath(str(target))), 260)
+        self.addCleanup(lambda: shutil.rmtree(_fs_path(base_long), ignore_errors=True))
+
+        atomic_write_text(target, "ilk icerik\n", backup_dir=deep / "bk")
+        atomic_write_text(target, "guncel icerik\n", backup_dir=deep / "bk")
+        self.assertEqual(read_text_retry(target), "guncel icerik\n")
+        baks = list(Path(_fs_path(deep / "bk")).glob("*.bak"))
+        self.assertEqual(len(baks), 1)
+
+    def test_finish_session_rollback_on_threads_failure(self):
+        r0 = vault.finish_session(
+            self.root, "order-service", "İlk oturum", session_id="s0", harness="claude", state_dir=self.state
+        )
+        son_before = (self.root / "projects/order-service/Son-Oturum.md").read_text(encoding="utf-8")
+        receipts_before = sorted(p.relative_to(self.root).as_posix() for p in (self.root / "receipts").rglob("*.md"))
+        orig_write = vault._Session.write
+
+        def fail_threads(sess_self, doc_id, content, action, detail=None):
+            if doc_id.endswith("Acik-Konular.md"):
+                raise OSError("disk hatasi")
+            return orig_write(sess_self, doc_id, content, action, detail)
+
+        with mock.patch.object(vault._Session, "write", fail_threads):
+            with self.assertRaises(OSError):
+                vault.finish_session(
+                    self.root, "order-service", "Başarısız oturum",
+                    open_threads=["Yeni görev"], session_id="s1", harness="claude", state_dir=self.state,
+                )
+
+        self.assertEqual(
+            sorted(p.relative_to(self.root).as_posix() for p in (self.root / "receipts").rglob("*.md")),
+            receipts_before,
+        )
+        self.assertEqual((self.root / "projects/order-service/Son-Oturum.md").read_text(encoding="utf-8"), son_before)
+        self.assertEqual(len(receipts_before), 1)
+        self.assertEqual(receipts_before[0], r0["receipt"])
+
+    def test_transaction_rollback_preserves_raw_bytes_crlf_and_non_utf8(self):
+        raw_bad = b"# Bozuk\r\n\xff\xfe\x80\x81\r\n"
+        raw_crlf = b"satir1\r\nsatir2\r\n"
+        p_bad = self.root / "knowledge/raw-bad.md"
+        p_crlf = self.root / "knowledge/raw-crlf.md"
+        p_bad.parent.mkdir(parents=True, exist_ok=True)
+        p_bad.write_bytes(raw_bad)
+        p_crlf.write_bytes(raw_crlf)
+
+        ctx = vault._ctx(self.root, self.state)
+        with vault._Session(ctx) as sess:
+            with self.assertRaises(RuntimeError):
+                with sess.transaction():
+                    sess.write("knowledge/raw-bad.md", "# overwritten\n", "test")
+                    sess.write("knowledge/raw-crlf.md", "overwritten\n", "test")
+                    raise RuntimeError("boom")
+            self.assertIsNone(sess._tx_snapshots)
+            self.assertIsNone(sess._tx_events)
+
+        self.assertEqual(p_bad.read_bytes(), raw_bad)
+        self.assertEqual(p_crlf.read_bytes(), raw_crlf)
+
+    def test_register_project_rollback_restores_projects_json_and_events(self):
+        pay_repo = self.make_repo("payments")
+        pjson_before = (self.root / "projects.json").read_bytes()
+        conn = store.connect(self.state)
+        try:
+            events_before = conn.execute("SELECT COUNT(*) FROM events WHERE action='project_add'").fetchone()[0]
+        finally:
+            conn.close()
+
+        orig_write = vault._Session.write
+
+        def fail_kurallar_pointer(sess_self, doc_id, content, action, detail=None):
+            if doc_id == "Kurallar.md":
+                raise OSError("disk hatasi")
+            return orig_write(sess_self, doc_id, content, action, detail)
+
+        with mock.patch.object(vault._Session, "write", fail_kurallar_pointer):
+            with self.assertRaises(OSError):
+                vault.register_project(self.root, "pay-svc", [pay_repo], name="PaySvc", state_dir=self.state)
+
+        self.assertEqual((self.root / "projects.json").read_bytes(), pjson_before)
+        self.assertIsNone(config.get_project(self.root, "pay-svc"))
+        self.assertFalse((self.root / "projects/pay-svc/PaySvc.md").exists())
+        self.assertNotIn("pay-svc", (self.root / "Kurallar.md").read_text(encoding="utf-8"))
+        conn = store.connect(self.state)
+        try:
+            events_after = conn.execute("SELECT COUNT(*) FROM events WHERE action='project_add'").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(events_after, events_before)
+
+        res = vault.register_project(self.root, "pay-svc", [pay_repo], name="PaySvc", state_dir=self.state)
+        self.assertEqual(res["status"], "created")
+        self.assertIsNotNone(config.get_project(self.root, "pay-svc"))
+
+
 if __name__ == "__main__":
     unittest.main()

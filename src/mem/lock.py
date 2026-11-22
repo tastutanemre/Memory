@@ -107,36 +107,60 @@ def resolve_in_vault(vault_root, rel) -> Path:
     return candidate
 
 
+def _fs_path(p: Path) -> str | Path:
+    """Windows MAX_PATH (>=240 kr) sinirini asan yollara `\\\\?\\` oneki ekler."""
+    if os.name == "nt":
+        s = os.path.abspath(str(p))
+        if not s.startswith("\\\\?\\") and len(s) >= 240:
+            if s.startswith("\\\\"):
+                return "\\\\?\\UNC\\" + s[2:]
+            return "\\\\?\\" + s
+    return p
+
+
+def _backup_prefix(name: str) -> str:
+    """Kisa adlari korur, 48 karakterden uzun dosya adlarini hash ile kisaltir."""
+    if len(name) <= 48:
+        return name
+    p = Path(name)
+    suf = p.suffix[:10]
+    stem = p.stem[:36]
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+    return f"{stem}-{digest}{suf}"
+
+
 def _prune_backups(backup_dir: Path, name: str, keep: int = 20) -> None:
-    files = sorted(backup_dir.glob(name + ".*.bak"), key=lambda p: p.name)
+    files = sorted(Path(_fs_path(backup_dir)).glob(name + ".*.bak"), key=lambda p: p.name)
     for old in files[:-keep]:
         try:
-            old.unlink()
+            os.unlink(_fs_path(old))
         except OSError:
             pass
 
 
-def atomic_write_text(path, content: str, backup_dir=None) -> str:
-    """UTF-8, `\\n` satir sonu; tmp + fsync + os.replace. Yeni sha256 dondurur."""
+def atomic_write_bytes(path, data: bytes, backup_dir=None) -> str:
+    """Ham baytlari yedekli + tmp + fsync + os.replace ile yazar. Yeni sha256 dondurur."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if backup_dir is not None and path.exists():
+    Path(_fs_path(path.parent)).mkdir(parents=True, exist_ok=True)
+    if backup_dir is not None and os.path.exists(_fs_path(path)):
         backup_dir = Path(backup_dir)
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        Path(_fs_path(backup_dir)).mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
-        shutil.copy2(path, backup_dir / f"{path.name}.{stamp}.bak")
-        _prune_backups(backup_dir, path.name)
-    data = content.replace("\r\n", "\n").encode("utf-8")
+        bname = _backup_prefix(path.name)
+        shutil.copy2(_fs_path(path), _fs_path(backup_dir / f"{bname}.{stamp}.bak"))
+        _prune_backups(backup_dir, bname)
     tmp = path.with_name(f".mem-tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
+    tmp_fs = _fs_path(tmp)
+    path_fs = _fs_path(path)
     try:
-        with open(tmp, "wb") as fh:
+        with open(tmp_fs, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
         delay = 0.0125
         for attempt in range(8):
             try:
-                os.replace(tmp, path)
+                os.replace(tmp_fs, path_fs)
                 break
             except PermissionError:
                 if attempt == 7:
@@ -144,12 +168,17 @@ def atomic_write_text(path, content: str, backup_dir=None) -> str:
                 time.sleep(delay)
                 delay = min(delay * 2, 0.1)
     finally:
-        if tmp.exists():
+        if os.path.exists(tmp_fs):
             try:
-                tmp.unlink()
+                os.unlink(tmp_fs)
             except OSError:
                 pass
     return sha256_bytes(data)
+
+
+def atomic_write_text(path, content: str, backup_dir=None) -> str:
+    """UTF-8, `\\n` satir sonu; tmp + fsync + os.replace. Yeni sha256 dondurur."""
+    return atomic_write_bytes(path, content.replace("\r\n", "\n").encode("utf-8"), backup_dir=backup_dir)
 
 
 def read_text_retry(path, attempts: int = 10) -> str:
@@ -157,7 +186,7 @@ def read_text_retry(path, attempts: int = 10) -> str:
     delay = 0.005
     for i in range(attempts):
         try:
-            return Path(path).read_text(encoding="utf-8")
+            return Path(_fs_path(Path(path))).read_text(encoding="utf-8")
         except PermissionError:
             if i == attempts - 1:
                 raise
