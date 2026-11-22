@@ -107,14 +107,24 @@ def resolve_in_vault(vault_root, rel) -> Path:
     return candidate
 
 
+def _win_ext_path(p: Path) -> str:
+    """Windows yoluna kosulsuz `\\\\?\\` (veya `\\\\?\\UNC\\`) uzun yol oneki ekler."""
+    s = os.path.abspath(str(p))
+    if s.startswith("\\\\?\\"):
+        return s
+    if s.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + s[2:]
+    return "\\\\?\\" + s
+
+
 def _fs_path(p: Path) -> str | Path:
-    """Windows MAX_PATH (>=240 kr) sinirini asan yollara `\\\\?\\` oneki ekler."""
+    """Windows MAX_PATH (>=240 UTF-16 kod birimi) sinirina yaklasan yollara `\\\\?\\` oneki ekler."""
     if os.name == "nt":
         s = os.path.abspath(str(p))
-        if not s.startswith("\\\\?\\") and len(s) >= 240:
-            if s.startswith("\\\\"):
-                return "\\\\?\\UNC\\" + s[2:]
-            return "\\\\?\\" + s
+        if not s.startswith("\\\\?\\"):
+            units = sum(2 if ord(c) > 0xFFFF else 1 for c in s)
+            if units >= 240:
+                return _win_ext_path(p)
     return p
 
 
@@ -139,24 +149,37 @@ def _prune_backups(backup_dir: Path, name: str, keep: int = 20) -> None:
 
 
 def atomic_write_bytes(path, data: bytes, backup_dir=None) -> str:
-    """Ham baytlari yedekli + tmp + fsync + os.replace ile yazar. Yeni sha256 dondurur."""
+    """Ham baytlari yedekli + tmp + fsync + os.replace ile yazar; yeni sha256 dondurur.
+
+    Mevcut hedef dosyanin POSIX izin bitleri (st_mode & 0o777) korunur; yeni olusturulan
+    dosyalarda standart Git/Markdown uyumu icin surecin aktif umask politikasi uygulanir.
+    """
     path = Path(path)
     Path(_fs_path(path.parent)).mkdir(parents=True, exist_ok=True)
-    if backup_dir is not None and os.path.exists(_fs_path(path)):
-        backup_dir = Path(backup_dir)
-        Path(_fs_path(backup_dir)).mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
-        bname = _backup_prefix(path.name)
-        shutil.copy2(_fs_path(path), _fs_path(backup_dir / f"{bname}.{stamp}.bak"))
-        _prune_backups(backup_dir, bname)
+    path_fs = _fs_path(path)
+    prev_mode: int | None = None
+    if os.path.exists(path_fs):
+        if os.name != "nt":
+            try:
+                prev_mode = os.stat(path_fs).st_mode & 0o777
+            except OSError:
+                prev_mode = None
+        if backup_dir is not None:
+            backup_dir = Path(backup_dir)
+            Path(_fs_path(backup_dir)).mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+            bname = _backup_prefix(path.name)
+            shutil.copy2(path_fs, _fs_path(backup_dir / f"{bname}.{stamp}.bak"))
+            _prune_backups(backup_dir, bname)
     tmp = path.with_name(f".mem-tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     tmp_fs = _fs_path(tmp)
-    path_fs = _fs_path(path)
     try:
         with open(tmp_fs, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
+        if os.name != "nt" and prev_mode is not None:
+            os.chmod(tmp_fs, prev_mode)
         delay = 0.0125
         for attempt in range(8):
             try:

@@ -1152,7 +1152,8 @@ class Pr4HardeningTests(VaultBase):
         baks = list((self.state / "backups").rglob("*.bak"))
         self.assertTrue(baks)
         for b in baks:
-            self.assertLess(len(str(b)), 220, f"Yedek yolu cok uzun ({len(str(b))}): {b}")
+            rel = b.relative_to(self.state)
+            self.assertLess(len(str(rel)), 140, f"Yedek yolu cok uzun ({len(str(rel))}): {rel}")
 
     def test_write_decision_rollback_on_supersede_failure_and_clean_retry(self):
         old = vault.record_decision(
@@ -1193,19 +1194,79 @@ class Pr4HardeningTests(VaultBase):
     def test_atomic_write_and_read_retry_exceeding_max_path(self):
         import shutil
         from pathlib import Path
-        from mem.lock import _fs_path, read_text_retry
+        from mem.lock import _fs_path, _win_ext_path, read_text_retry
 
         base_long = self.tmp / ("d" * 60)
         deep = base_long / ("e" * 60) / ("f" * 60) / ("g" * 60)
         target = deep / ("long_note_name_" + "x" * 45 + ".md")
         self.assertGreater(len(os.path.abspath(str(target))), 260)
-        self.addCleanup(lambda: shutil.rmtree(_fs_path(base_long), ignore_errors=True))
+        rm_base = _win_ext_path(base_long) if os.name == "nt" else base_long
+        self.addCleanup(lambda: shutil.rmtree(rm_base, ignore_errors=True))
 
         atomic_write_text(target, "ilk icerik\n", backup_dir=deep / "bk")
         atomic_write_text(target, "guncel icerik\n", backup_dir=deep / "bk")
         self.assertEqual(read_text_retry(target), "guncel icerik\n")
         baks = list(Path(_fs_path(deep / "bk")).glob("*.bak"))
         self.assertEqual(len(baks), 1)
+
+    def test_rollback_continues_when_unchanged_or_locked_file_cannot_be_written(self):
+        old = vault.record_decision(
+            self.root, "order-service", "Kilitli eski karar", "Eski metin", state_dir=self.state
+        )
+        old_full = self.root / old["path"]
+        orig_awb = vault.atomic_write_bytes
+
+        def fail_on_old_path(path, data, backup_dir=None):
+            if os.path.abspath(str(path)) == os.path.abspath(str(old_full)):
+                raise PermissionError("baska surec kilitledi")
+            return orig_awb(path, data, backup_dir=backup_dir)
+
+        with mock.patch.object(vault, "atomic_write_text", lambda p, c, backup_dir=None: fail_on_old_path(p, c.encode("utf-8"), backup_dir=backup_dir)):
+            with mock.patch.object(vault, "atomic_write_bytes", fail_on_old_path):
+                with self.assertRaises(PermissionError):
+                    vault.record_decision(
+                        self.root, "order-service", "Yeni karar kilit testi", "Yeni metin",
+                        supersedes=[old["path"]], state_dir=self.state,
+                    )
+
+        # `old` hic degistirilemedigi icin `_tx_dirty` icine girmemeli ve yeni ADR temizce silinmeli
+        karar_files = sorted(
+            p.relative_to(self.root).as_posix()
+            for p in (self.root / "projects/order-service/kararlar").glob("*.md")
+        )
+        self.assertEqual(karar_files, [old["path"]])
+
+        # Ve dirty bir dosyanin geri yuklenmesi de basarisiz olsa bile kalan dosyalar yine geri alinmali
+        ctx = vault._ctx(self.root, self.state)
+        p_keep = self.root / "knowledge/locked-restore.md"
+        p_new = self.root / "knowledge/temp-created.md"
+        p_keep.parent.mkdir(parents=True, exist_ok=True)
+        p_keep.write_text("ilk\n", encoding="utf-8")
+
+        def fail_restore_keep(path, data, backup_dir=None):
+            if backup_dir is None and os.path.abspath(str(path)) == os.path.abspath(str(p_keep)):
+                raise PermissionError("restore sirasinda kilitli")
+            return orig_awb(path, data, backup_dir=backup_dir)
+
+        with vault._Session(ctx) as sess:
+            with mock.patch.object(vault, "atomic_write_bytes", fail_restore_keep):
+                with self.assertRaises(RuntimeError) as cm:
+                    with sess.transaction():
+                        sess.write("knowledge/temp-created.md", "gecici\n", "test")
+                        sess.write("knowledge/locked-restore.md", "degisti\n", "test")
+                        raise RuntimeError("islem hatasi")
+            self.assertTrue(any("Rollback kismi hatasi" in n for n in getattr(cm.exception, "__notes__", [])))
+        self.assertFalse(p_new.exists())
+
+    def test_transaction_event_flush_failure_rolls_back_files_and_events(self):
+        p_note = self.root / "knowledge/ev-rollback.md"
+        ctx = vault._ctx(self.root, self.state)
+        with vault._Session(ctx) as sess:
+            with mock.patch.object(store, "log_event", side_effect=RuntimeError("audit hatasi")):
+                with self.assertRaises(RuntimeError):
+                    with sess.transaction():
+                        sess.write("knowledge/ev-rollback.md", "icerik\n", "test")
+        self.assertFalse(p_note.exists())
 
     def test_finish_session_rollback_on_threads_failure(self):
         r0 = vault.finish_session(

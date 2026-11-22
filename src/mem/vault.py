@@ -137,6 +137,8 @@ class _Session:
         self._lock = VaultLock(ctx.state_dir / "writer.lock")
         self.conn = None
         self._tx_snapshots: dict[str, bytes | None] | None = None
+        self._tx_snapshots: dict[str, bytes | None] | None = None
+        self._tx_dirty: list[str] | None = None
         self._tx_events: list[tuple] | None = None
 
     def __enter__(self):
@@ -158,40 +160,57 @@ class _Session:
 
     @contextmanager
     def transaction(self):
-        """Cok dosyali yazmalarda hata halinde tum degisiklikleri ve indeksi geri alir."""
+        """Cok dosyali yazmalarda hata halinde degisen dosyalari, olaylari ve indeksi geri alir."""
         if self._tx_snapshots is not None:
             yield
             return
         self._tx_snapshots = {}
+        self._tx_dirty = []
         self._tx_events = []
         try:
             yield
-        except BaseException:
+            if self._tx_events:
+                self.conn.execute("SAVEPOINT mem_tx_events")
+                try:
+                    for action, doc_id, sha, actor, detail in self._tx_events:
+                        store.log_event(self.conn, action, doc_id, sha, actor, detail)
+                except BaseException:
+                    self.conn.execute("ROLLBACK TO mem_tx_events")
+                    self.conn.execute("RELEASE mem_tx_events")
+                    raise
+                else:
+                    self.conn.execute("RELEASE mem_tx_events")
+        except BaseException as exc:
+            rb_errors: list[str] = []
             try:
-                for doc_id, orig in reversed(list(self._tx_snapshots.items())):
+                for doc_id in reversed(self._tx_dirty):
+                    orig = self._tx_snapshots.get(doc_id)
                     full = self.path(doc_id)
-                    if orig is None:
-                        try:
-                            os.unlink(_fs_path(full))
-                        except FileNotFoundError:
-                            pass
-                    else:
-                        atomic_write_bytes(full, orig, backup_dir=None)
+                    try:
+                        if orig is None:
+                            try:
+                                os.unlink(_fs_path(full))
+                            except FileNotFoundError:
+                                pass
+                        else:
+                            atomic_write_bytes(full, orig, backup_dir=None)
+                    except OSError as rb_exc:
+                        rb_errors.append(f"{doc_id}: {type(rb_exc).__name__}: {rb_exc}")
                 try:
                     store.sync_vault(self.conn, self.ctx.vault_root)
                 except Exception:  # noqa: BLE001
                     pass
             finally:
                 self._tx_snapshots = None
+                self._tx_dirty = None
                 self._tx_events = None
+            if rb_errors:
+                exc.add_note("Rollback kismi hatasi: " + "; ".join(rb_errors))
             raise
         else:
-            try:
-                for action, doc_id, sha, actor, detail in self._tx_events:
-                    store.log_event(self.conn, action, doc_id, sha, actor, detail)
-            finally:
-                self._tx_snapshots = None
-                self._tx_events = None
+            self._tx_snapshots = None
+            self._tx_dirty = None
+            self._tx_events = None
 
     def path(self, doc_id: str) -> Path:
         return resolve_in_vault(self.ctx.vault_root, doc_id)
@@ -211,6 +230,10 @@ class _Session:
             fs_full = _fs_path(self.path(doc_id))
             self._tx_snapshots[doc_id] = Path(fs_full).read_bytes() if os.path.exists(fs_full) else None
 
+    def mark_dirty(self, doc_id: str) -> None:
+        if self._tx_dirty is not None and doc_id not in self._tx_dirty:
+            self._tx_dirty.append(doc_id)
+
     def record_event(self, action: str, doc_id: str, sha: str | None = None, detail: dict | None = None) -> None:
         if self._tx_events is not None:
             self._tx_events.append((action, doc_id, sha, self.actor, detail))
@@ -221,6 +244,7 @@ class _Session:
         self.snapshot(doc_id)
         backup = _backup_dir_for_doc(self.ctx.state_dir, doc_id)
         sha = atomic_write_text(self.path(doc_id), text, backup_dir=backup)
+        self.mark_dirty(doc_id)
         self.record_event(action, doc_id, sha, detail)
         return sha
 
@@ -461,12 +485,13 @@ def register_project(vault_root, slug: str, repo_roots, name: str | None = None,
                 action = "updated"
             sess.snapshot("projects.json")
             config.save_projects(ctx.vault_root, projects)
+            sess.mark_dirty("projects.json")
             sess.record_event("project_add", "projects.json", detail={"slug": slug, "roots": entry["roots"]})
             pname = entry["name"]
             for doc_id, text in _project_files(slug, pname, entry.get("description", ""), _iso(now)).items():
                 if not sess.exists(doc_id):
                     sess.write(doc_id, text, "project_init")
-            (ctx.vault_root / "projects" / slug / "kararlar").mkdir(parents=True, exist_ok=True)
+            Path(_fs_path(ctx.vault_root / "projects" / slug / "kararlar")).mkdir(parents=True, exist_ok=True)
             pointer = f"- [kapsam: {slug}] [[projects/{slug}/Kurallar|{pname} kuralları]]"
             rules = sess.read("Kurallar.md")
             if f"[[projects/{slug}/Kurallar|" not in rules:
@@ -481,12 +506,12 @@ def register_project(vault_root, slug: str, repo_roots, name: str | None = None,
 
 
 def _decision_entries(sess: _Session, slug: str) -> list[dict]:
-    d = sess.path(f"projects/{slug}/kararlar")
+    d = Path(_fs_path(sess.path(f"projects/{slug}/kararlar")))
     out = []
     if not d.is_dir():
         return out
     for f in sorted(d.glob("*.md"), reverse=True):
-        meta, _ = parse_markdown(f.read_text(encoding="utf-8", errors="replace"))
+        meta, _ = parse_markdown(Path(_fs_path(f)).read_text(encoding="utf-8", errors="replace"))
         out.append(
             {
                 "doc_id": f"projects/{slug}/kararlar/{f.name}",
@@ -644,7 +669,7 @@ def read_note(vault_root, path: str, project: str | None = None, state_dir=None)
     """Not okur; `project` verilmisse baska projenin notunu reddeder."""
     root = Path(os.path.abspath(str(vault_root)))
     doc_id = _check_note_path(path)
-    full = resolve_in_vault(root, doc_id)
+    full = Path(_fs_path(resolve_in_vault(root, doc_id)))
     if not full.is_file():
         raise VaultError(f"Not bulunamadı: {doc_id}")
     raw = full.read_bytes()
@@ -740,7 +765,7 @@ def _filter_global_rules(grules: str, root: Path, slug: str | None) -> str:
 
 def _read_if_exists(root: Path, doc_id: str) -> str | None:
     try:
-        full = resolve_in_vault(root, doc_id)
+        full = Path(_fs_path(resolve_in_vault(root, doc_id)))
         if full.is_file():
             return parse_markdown(full.read_text(encoding="utf-8", errors="replace"))[1].strip()
     except (OSError, PathTraversalError):
