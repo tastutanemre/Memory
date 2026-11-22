@@ -25,7 +25,7 @@ RULE_BLOCK = f"""{BLOCK_START}
 - Her `memory_*` çağrısında aktif çalışma alanı yolunu `cwd` parametresiyle gönder (sunucu IDE'nin başlattığı dizinde çalışır, repo dizininde değil).
 - Mimari/ürün kararı verildiğinde `memory_decide` ile kaydet; eski bir kararın yerine geçiyorsa `supersedes` ver (`duplicate_warning` veya `advisor_warning` dönerse kullanıcı onayı olmadan `force=true` kullanma).
 - Kullanıcı seni düzelttiğinde kalıcı kuralı `memory_rule` ile kaydet.
-- Anlamlı bir iş bitince `memory_finish` ile özet, açık konular ve kaynakları yaz.
+- Anlamlı bir iş bitince `memory_finish` ile özet, açık konular (`open_threads` yalnız bu istemciye ait açık konuları günceller; başka ajanların tamamladığı maddeleri `close_threads` ile kimlik `t:...` veya tam metin vererek kapat) ve kaynakları yaz.
 - `memory_bootstrap` `status: unregistered_workspace` dönerse bu repo hafıza beyaz listesinde değildir:
   hafızaya HİÇBİR ŞEY yazma ve hafızadan hiçbir bilgi aktarma.
 - Parola, token, anahtar, bağlantı dizesi ve kişisel veriyi hafızaya asla yazma.
@@ -143,8 +143,10 @@ def _json_load(path: Path, text: str | None) -> dict:
 
 
 def _mcp_entry(profile_name: str, mem_py: Path, python: str, vault_scope: bool = False,
-               advisor: str | None = None) -> dict:
+               advisor: str | None = None, harness_name: str | None = None) -> dict:
     args = [str(mem_py), "mcp", "--profile", profile_name]
+    if harness_name:
+        args += ["--harness", harness_name]
     if vault_scope:
         args.append("--vault-scope")
     if advisor in config.ADVISOR_MODES:
@@ -196,7 +198,7 @@ def connect_harness(harness: str, profile_name: str, config_root_override=None, 
     t = _targets(harness, config_root_override)
     mem_py = Path(mem_py_path) if mem_py_path else default_mem_py()
     entry = _mcp_entry(profile_name, mem_py, python_exe or sys.executable,
-                       vault_scope=bool(t.get("vault_scope")), advisor=adv)
+                       vault_scope=bool(t.get("vault_scope")), advisor=adv, harness_name=harness)
     files: list[dict] = []
 
     # --- MCP kaydi

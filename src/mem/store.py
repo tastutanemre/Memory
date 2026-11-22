@@ -354,6 +354,7 @@ def _index_doc(conn, doc_id: str, data: bytes, st) -> tuple[list[str], list[str]
 
 def _resolver(conn):
     ids = {r[0] for r in conn.execute("SELECT doc_id FROM documents")}
+    low = {i.lower(): i for i in ids}
     by_stem: dict[str, list[str]] = {}
     for i in ids:
         by_stem.setdefault(Path(i).stem.lower(), []).append(i)
@@ -361,7 +362,6 @@ def _resolver(conn):
     def resolve(target: str) -> str:
         if target in ids:
             return target
-        low = {i.lower(): i for i in ids}
         if target.lower() in low:
             return low[target.lower()]
         if "/" not in target:

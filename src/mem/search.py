@@ -80,7 +80,7 @@ def search_vault(
         where.append("d.status != 'archived'")
         where.append("d.doc_id NOT LIKE 'archive/%'")
     if project:
-        where.append("(d.project = ? OR d.project IS NULL)")
+        where.append("(d.project = ? OR (d.project IS NULL AND d.kind != 'receipt'))")
         params.append(project)
     if kinds:
         where.append("d.kind IN (%s)" % ",".join("?" for _ in kinds))

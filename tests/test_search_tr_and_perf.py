@@ -119,6 +119,29 @@ class SearchTests(IsolatedCase):
         a2 = self.ids("kuantum rotasyonu", project="alpha")
         self.assertFalse([i for i in a2 if i.startswith("receipts/")])
 
+    def test_null_project_receipt_does_not_leak_into_project_search(self):
+        self.write_md(self.root, "knowledge/ortak.md", "# Ortak\n\nkuantum ortak bilgi\n")
+        vault.finish_session(self.root, str(self.root), "kuantum kasa bakımı tamamlandı", state_dir=self.state)
+        a_ids = self.ids("kuantum", project="alpha")
+        self.assertIn("knowledge/ortak.md", a_ids)
+        self.assertFalse([i for i in a_ids if i.startswith("receipts/")])
+
+        # aktif reranker kurtarma havuzunda da sizmamali
+        seen_recovery = []
+
+        class SpyReranker:
+            def rerank(self, query, results):
+                seen_recovery.extend(r["doc_id"] for r in results)
+                return results
+
+        vault.search_memory(self.root, "hic_eslesmeyen_terim_xyz", project="alpha",
+                            state_dir=self.state, reranker=SpyReranker())
+        self.assertFalse([i for i in seen_recovery if i.startswith("receipts/")])
+
+        # kasa kapsaminda (project=None) makbuzlar hala bulunabilir
+        v_ids = self.ids("kuantum kasa bakımı", project=None)
+        self.assertTrue(any(i.startswith("receipts/") for i in v_ids))
+
     def test_project_and_kind_boost_and_graph(self):
         self.write_md(self.root, "projects/alpha/x.md", "# X\n\nönbellek stratejisi notu\n")
         self.write_md(self.root, "knowledge/y.md", "# Y\n\nönbellek stratejisi notu\n")

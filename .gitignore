@@ -20,4 +20,5 @@ venv/
 htmlcov/
 vault/
 vaults/
+vault.bak*/
 MemVault/
