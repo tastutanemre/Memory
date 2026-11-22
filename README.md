@@ -369,12 +369,12 @@ python mem.py mcp --profile personal --harness claude [--vault-scope] [--advisor
 ## 8. Güvenlik Modeli ve Hassas Veri Kalkanı (DLP)
 
 ### 8.1. Otomatik Yakalanan Hassas Veri Kategorileri (`dlp.py`)
-1. **`api_token`:** GitHub (`ghp_`, `gho_`, `github_pat_`), OpenAI/Anthropic (`sk-`), Google (`AIza`), AWS (`AKIA`, `ASIA`), HuggingFace (`hf_`), Slack (`xox...`), Stripe (`sk_live_`, `rk_live_`), npm (`npm_`), SendGrid (`SG.`), Discord token'ları, HashiCorp Vault (`hvs.`) ve Azure SAS imzaları.
+1. **`api_token`:** GitHub (`ghp_`, `gho_`, `github_pat_`), OpenAI/Anthropic (`sk-`), Google (`AIza`), AWS (`AKIA`, `ASIA`), HuggingFace (`hf_`), Slack (`xox...`), Stripe (`sk_live_`, `rk_live_`, `pk_live_`), npm (`npm_`), SendGrid (`SG.`), Discord token'ları, HashiCorp Vault (`hvs.`) ve Azure SAS imzaları.
 2. **`private_key`:** Tam veya yarıda kesilmiş `-----BEGIN ... PRIVATE KEY-----` (`RSA`, `EC`, `OPENSSH`, `PGP`) blokları.
-3. **`jwt_bearer`:** Standart 3 parçalı JWT ve 5 parçalı JWE (`eyJ...`) dizeleri, `Authorization:`, `Bearer ...`, `Cookie:` ve `Set-Cookie:` başlıkları.
-4. **`connection_string`:** `postgres://`, `mysql://`, `mongodb+srv://`, `redis://`, `amqps://`, `sqlserver://` bağlantı URI'leri *(kimlik bilgisi içermeyen yerel `localhost` / `127.0.0.1` bağlantıları yanlış alarm vermemek için muaf tutulur)* ve sıra bağımsız ADO.NET `Server=...;Password=...` dizeleri.
-5. **`generic_secret_assignment`:** `.env`, JSON veya YAML biçimindeki `api_key=...`, `access_token: "..."`, `client_secret=...`, `DB_PASSWORD=...`, `JWT_SECRET=...` atamaları.
-6. **`pii_tr`:** Resmi 10. ve 11. hane algoritma doğrulamasından geçen **T.C. Kimlik Numaraları** ve **TR IBAN** numaraları.
+3. **`jwt_bearer`:** Standart 3 parçalı JWT ve 5 parçalı JWE (`eyJ...`) dizeleri, geçerli şemalı veya yüksek entropili `Authorization:` başlıkları (`Bearer`, `Basic`, `Token`, `ApiKey` vb.), `Bearer ...`, `Cookie:` ve `Set-Cookie:` başlıkları.
+4. **`connection_string`:** `postgres://`, `mysql://`, `mongodb+srv://`, `redis://`, `amqps://`, `sqlserver://` bağlantı URI'leri *(kimlik bilgisi ve gizli sorgu parametresi içermeyen yerel `localhost` / `127.0.0.1` / `[::1]` bağlantıları yanlış alarm vermemek için muaf tutulur)*, kimlik bilgili `https://kullanici:parola@...` adresleri ve sıra bağımsız ADO.NET `Server=...;Password=...` dizeleri.
+5. **`generic_secret_assignment`:** `.env`, JSON veya YAML biçimindeki `TOKEN=...`, `API_TOKEN=...`, `GITHUB_TOKEN=...`, `api_key=...`, `access_token: "..."`, `client_secret=...`, `DB_PASSWORD=...`, `JWT_SECRET=...` atamaları ve URL sorgu/fragment parametrelerindeki (`?token=...`, `&api_key=...`, `#access_token=...`) gizli değerler *(sayfalama/sayaç anahtarları `max_tokens`, `page_token` vb. hariç)*.
+6. **`pii_tr`:** Resmi 10. ve 11. hane algoritmasından geçen **T.C. Kimlik Numaraları** ve resmi **ISO 7064 Mod-97** kontrol hanesi doğrulamasından geçen **TR IBAN** numaraları.
 7. **`custom_pattern` (`dlp-patterns.txt`):** Kasa kökündeki `dlp-patterns.txt` dosyasına eklediğiniz şirket içi alan adları, IP blokları veya özel token önekleri (ör. `regex:\bsirket_[A-Za-z0-9]{16,}`). Regex desenleri ReDoS saldırılarına karşı uzunluk (`<=200`) ve iç içe nicelik denetiminden geçirilir.
 
 > **Dürüst Sınır:** Bilinen bir öneki olmayan **ve** başında `token=` / `secret=` gibi bir anahtar adı bulunmadan düz cümlenin içine çıplak yapıştırılmış özel rastgele dizeleri hiçbir desen tarayıcısı tek başına %100 bilemez. Özel iç anahtar biçimleriniz varsa `dlp-patterns.txt` içine tek satırlık önek eklemeniz önerilir.

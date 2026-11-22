@@ -353,7 +353,7 @@ def _normalize_tags(tags: list[str] | None) -> list[str]:
         s = (t or "").strip()
         if not s:
             continue
-        norm = slugify(s, 32)
+        norm = slugify(s, 63)
         if norm not in seen:
             seen.add(norm)
             out.append(norm)
@@ -602,7 +602,7 @@ def _filter_global_rules(grules: str, root: Path, slug: str | None) -> str:
     if slug is None:
         return grules
     proj_info = config.get_project(root, slug) or {}
-    proj_tags = {slugify(t, 32) for t in (proj_info.get("tags") or []) if t} | {slug}
+    proj_tags = {slugify(t, 63) for t in (proj_info.get("tags") or []) if t} | {slug}
     kept: list[str] = []
     hidden_rules = 0
     for ln in grules.split("\n"):
@@ -613,7 +613,7 @@ def _filter_global_rules(grules: str, root: Path, slug: str | None) -> str:
             continue
         rm = _RULE_LINE_RE.match(ln)
         if rm and rm.group(1):
-            rtags = {slugify(x.strip(), 32) for x in rm.group(1).split(",") if x.strip()}
+            rtags = {slugify(x.strip(), 63) for x in rm.group(1).split(",") if x.strip()}
             if rtags and not (rtags & proj_tags):
                 hidden_rules += 1
                 continue

@@ -52,14 +52,24 @@ _PRIVATE_KEY = (
 _JWT_PATTERNS = [
     r"\beyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]*",
     r"\beyJ[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]*){4}",
-    r"\bAuthorization\s*:\s*\S+(?:[ \t]+\S+)?",
-    r"\bBearer[ \t]+[A-Za-z0-9._~+/=\-]{8,}",
     r"(?i)\b(?:Set-)?Cookie[ \t]*:[ \t]*[^=\s]+=\S+[^\n]*",
 ]
+_AUTH_SCHEME_RE = re.compile(
+    r"\bAuthorization[ \t]*:[ \t]*"
+    r"(?:Bearer|Basic|Token|ApiKey|Api-Key|Digest|HOBA|Mutual|Negotiate|OAuth|AWS4-HMAC-SHA256|SharedKey|SSWS)"
+    r"[ \t]+(?P<val>[^\s\"'<>]{6,})",
+    _I,
+)
+_AUTH_RAW_RE = re.compile(
+    r"\bAuthorization[ \t]*:[ \t]*(?P<val>[A-Za-z0-9._~+/=\-]{16,})(?![ \t]+[A-Za-zğüşıöçĞÜŞİÖÇ])",
+    _I,
+)
+_BEARER_RE = re.compile(r"\bBearer[ \t]+(?P<val>[A-Za-z0-9._~+/=\-]{8,})")
 _CONN_URI = re.compile(
     r"\b(?:postgres|postgresql|mysql|mariadb|mongodb|mongodb\+srv|redis|rediss|amqp|amqps|mssql|sqlserver)://[^\s\"']+",
     _I,
 )
+_HTTP_CRED_URI = re.compile(r"\bhttps?://[^/\s\"'<>@]+:[^/\s\"'<>@]+@[^\s\"'<>]+", _I)
 _CONN_ADO = re.compile(
     r"\b(?:Server|Data Source|Host)=[^;\n]+;[^\n]*?(?:Password|Pwd)=[^;\n]+",
     _I,
@@ -69,12 +79,29 @@ _ADO_SECRET = re.compile(r"\b(?:Password|Pwd)\s*=\s*[^;\n]+", _I)
 _ADO_CONTEXT = re.compile(
     r"\b(?:Server|Data Source|Host|User Id|Uid|Initial Catalog|Database|Integrated Security)\s*=", _I
 )
-_URI_QUERY_SECRET = re.compile(r"[?&;](?:password|passwd|pwd|pass|secret|token|api[_-]?key)=[^&\s]+", _I)
-# `DB_PASSWORD=`, `JWT_SECRET=`, `AWS_SECRET_ACCESS_KEY=`, `"password": "..."` gibi onekli/tirnakli atamalar dahil.
+_NON_SECRET_TOKEN_KEY_RE = re.compile(
+    r"(?:^|[_.\-])(?:max|min|total|input|output|prompt|completion|thinking|cached|num|budget|"
+    r"page|next[_-]?page|prev[_-]?page|continuation|cancel|cancellation|stop|csrf|xsrf)[_-]?token$",
+    _I,
+)
+_CONN_URI_QUERY_SECRET = re.compile(
+    r"(?<=[?&#;])(?P<key>(?:[A-Za-z0-9_.\-]*[_.\-])?"
+    r"(?:password|passwd|pwd|pass|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key))"
+    r"=(?P<val>[^&#;\s\"'<>]+)",
+    _I,
+)
+_URI_QUERY_PARAM = re.compile(
+    r"(?<=[?&#;])(?P<key>(?:[A-Za-z0-9_.\-]*[_.\-])?"
+    r"(?:password|passwd|pwd|pass|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key))"
+    r"=(?P<val>[^&#;\s\"'<>]{8,})",
+    _I,
+)
+# `DB_PASSWORD=`, `GITHUB_TOKEN=`, `TOKEN=`, `"token": "..."` gibi onekli/tirnakli atamalar dahil.
 _GENERIC = re.compile(
-    r"(?:api[_-]?key|access[_-]?key|secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|"
-    r"secret|password|passwd|pwd|auth[_-]?token|access[_-]?token|refresh[_-]?token)"
-    r"[\"']?\s*[:=]\s*[\"']?[^\s\"',;]{8,}",
+    r"\b(?P<key>(?:[A-Za-z0-9_.\-]*[_.\-])?"
+    r"(?:api[_-]?key|access[_-]?key|secret[_-]?access[_-]?key|secret[_-]?key|private[_-]?key|"
+    r"client[_-]?secret|secret|password|passwd|pwd|token))"
+    r"[\"']?\s*[:=]\s*[\"']?(?P<val>[^\s\"',;\}]{8,})",
     _I,
 )
 _IBAN = re.compile(r"\bTR\d{2}\s?(?:\d{4}\s?){5}\d{2}\b")
@@ -88,6 +115,38 @@ for _p in _JWT_PATTERNS:
     _COMPILED_STATIC.append(("jwt_bearer", re.compile(_p)))
 
 
+def _is_placeholder_value(val: str) -> bool:
+    v = val.strip()
+    if not v:
+        return True
+    low = v.lower()
+    if low in ("null", "none", "true", "false", "undefined", "redacted"):
+        return True
+    if v.startswith(("[REDACTED:", "<", "${", "{{", "http://", "https://")):
+        return True
+    if re.match(r"^\$[A-Z_][A-Z0-9_]*$", v):
+        return True
+    if len(set(v)) == 1 and v[0] in ".*xX-_?":
+        return True
+    return False
+
+
+def _extract_authority_host(authority: str) -> str:
+    hostport = authority.rsplit("@", 1)[-1]
+    if hostport.startswith("[") and "]" in hostport:
+        return hostport[1 : hostport.index("]")].lower()
+    return hostport.split(":", 1)[0].lower()
+
+
+def _has_query_secret(uri: str) -> bool:
+    for m in _CONN_URI_QUERY_SECRET.finditer(uri):
+        key, val = m.group("key"), m.group("val")
+        if _NON_SECRET_TOKEN_KEY_RE.search(key) or _is_placeholder_value(val):
+            continue
+        return True
+    return False
+
+
 def valid_tckn(number: str) -> bool:
     """Resmi TCKN algoritmasi (10. ve 11. hane dogrulamasi)."""
     if len(number) != 11 or not number.isdigit() or number[0] == "0":
@@ -98,6 +157,15 @@ def valid_tckn(number: str) -> bool:
     if (odd * 7 - even) % 10 != d[9]:
         return False
     return sum(d[:10]) % 10 == d[10]
+
+
+def valid_tr_iban(iban: str) -> bool:
+    """Resmi ISO 7064 Mod 97-10 TR IBAN kontrol hanesi dogrulamasi."""
+    compact = re.sub(r"\s+", "", iban).upper()
+    if len(compact) != 26 or not compact.startswith("TR") or not compact[2:].isdigit():
+        return False
+    rearranged = compact[4:] + "2927" + compact[2:4]
+    return int(rearranged) % 97 == 1
 
 
 def _mask(raw: str) -> str:
@@ -144,15 +212,38 @@ def scan(text: str, vault_root=None) -> list[dict]:
     for cat, pat in _COMPILED_STATIC:
         for m in pat.finditer(text):
             add(cat, m)
+    for m in _AUTH_SCHEME_RE.finditer(text):
+        if not _is_placeholder_value(m.group("val")):
+            add("jwt_bearer", m)
+    for m in _AUTH_RAW_RE.finditer(text):
+        val = m.group("val")
+        if _is_placeholder_value(val):
+            continue
+        if any(not c.isalpha() for c in val) or (val != val.lower() and val != val.upper()):
+            add("jwt_bearer", m)
+    for m in _BEARER_RE.finditer(text):
+        val = m.group("val")
+        if _is_placeholder_value(val):
+            continue
+        if val.isalpha() and val.lower().startswith(("token", "auth", "header", "scheme", "format", "yetki")):
+            continue
+        add("jwt_bearer", m)
     for m in _CONN_URI.finditer(text):
         uri = m.group(0)
         rest = uri.split("://", 1)[1]
-        authority = rest.split("/", 1)[0]
+        authority = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
         has_cred = "@" in authority
-        host = authority.rsplit("@", 1)[-1].split(":")[0].lower()
-        if not has_cred and host in ("localhost", "127.0.0.1", "::1") and not _URI_QUERY_SECRET.search(uri):
+        host = _extract_authority_host(authority)
+        if not has_cred and host in ("localhost", "127.0.0.1", "::1") and not _has_query_secret(uri):
             continue
         add("connection_string", m)
+    for m in _HTTP_CRED_URI.finditer(text):
+        uri = m.group(0)
+        authority = uri.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+        userinfo = authority.rsplit("@", 1)[0]
+        pwd = userinfo.split(":", 1)[1] if ":" in userinfo else ""
+        if pwd and not _is_placeholder_value(pwd):
+            add("connection_string", m)
     for m in _CONN_ADO.finditer(text):
         add("connection_string", m)
     for line_m in re.finditer(r"[^\n]+", text):
@@ -161,10 +252,19 @@ def scan(text: str, vault_root=None) -> list[dict]:
             for m in _ADO_SECRET.finditer(line):
                 findings.append({"category": "connection_string", "start": line_m.start() + m.start(),
                                  "end": line_m.start() + m.end(), "preview": _mask(m.group(0))})
+    for m in _URI_QUERY_PARAM.finditer(text):
+        key, val = m.group("key"), m.group("val")
+        if len(val) < 8 or _NON_SECRET_TOKEN_KEY_RE.search(key) or _is_placeholder_value(val):
+            continue
+        add("generic_secret_assignment", m)
     for m in _GENERIC.finditer(text):
+        key, val = m.group("key"), m.group("val")
+        if _NON_SECRET_TOKEN_KEY_RE.search(key) or _is_placeholder_value(val):
+            continue
         add("generic_secret_assignment", m)
     for m in _IBAN.finditer(text):
-        add("pii_tr", m)
+        if valid_tr_iban(m.group(0)):
+            add("pii_tr", m)
     for m in _TCKN.finditer(text):
         if valid_tckn(m.group(0)):
             add("pii_tr", m)

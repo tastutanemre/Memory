@@ -147,6 +147,71 @@ class DlpUnitTests(IsolatedCase):
         (root / "dlp-patterns.txt").write_text("regex:(a+)+$\nregex:[unclosed\n", encoding="utf-8")
         self.assertEqual(dlp.load_custom_patterns(root), [])
 
+    def test_token_assignments_query_secrets_and_false_positive_guards(self):
+        must_catch = [
+            "TOKEN=a8f3k2m9q7x1z5",
+            "API_TOKEN=a8f3k2m9q7x1z5",
+            "GITHUB_TOKEN=a8f3k2m9q7x1z5",
+            '{"token": "a8f3k2m9q7x1z5"}',
+            "https://api.example.com/cb?token=a8f3k2m9q7x1z5",
+            "https://api.example.com/v1?foo=1&api_key=secretkey12345",
+            "https://app.example.com/cb#access_token=tok_abcdef123456",
+        ]
+        for s in must_catch:
+            cats = {f["category"] for f in dlp.scan(s, None)}
+            self.assertIn("generic_secret_assignment", cats, f"yakalanmadi: {s}")
+            redacted, _ = dlp.inspect_and_apply(s, "redact", None)
+            self.assertNotIn("a8f3k2m9", redacted)
+            self.assertNotIn("secretkey12345", redacted)
+            self.assertNotIn("tok_abcdef", redacted)
+
+        safe_non_secrets = [
+            "max_tokens=16384000",
+            "max_token=80000000",
+            "completion_tokens: 12345678",
+            "next_page_token=eyJpageCursor123",
+            "cancel_token=req_cancel_12345",
+            "token_type = 'authorization_code'",
+            "token_endpoint = 'https://auth.example.com/oauth2/token'",
+            "GITHUB_TOKEN=${GITHUB_TOKEN}",
+            "API_TOKEN=<api_anahtariniz>",
+            "https://api.example.com/list?page_token=cursor_12345678",
+            "https://api.example.com/cb?token=<gecici_token>",
+        ]
+        for s in safe_non_secrets:
+            self.assertEqual(dlp.scan(s, None), [], f"yanlis alarm: {s}")
+
+    def test_ipv6_localhost_authorization_prose_and_iban_mod97(self):
+        # IPv6 [::1] localhost muafiyeti
+        self.assertEqual(dlp.scan("postgres://[::1]:5432/app", None), [])
+        self.assertEqual(dlp.scan("redis://[::1]/0", None), [])
+        self.assertEqual(dlp.scan("https://[::1]:8080/health", None), [])
+        self.assertTrue(dlp.scan("postgres://appuser:S3cretPass@[::1]:5432/app", None))
+        self.assertTrue(dlp.scan("postgres://[::1]:5432/app?password=S3cretPass", None))
+        self.assertTrue(dlp.scan("https://svc:S3cretPass@api.example.com/hook", None))
+
+        # Authorization: duz cumle vs gercek baslik
+        for prose in (
+            "Authorization: gerekli degil",
+            "Authorization: başlığı zorunludur",
+            "Authorization: Bearer <token>",
+        ):
+            self.assertEqual(dlp.scan(prose, None), [], f"yanlis alarm: {prose}")
+        for real_hdr in (
+            "Authorization: Bearer abcdefghijkl",
+            "Authorization: Basic dXNlcjpwYXNz",
+            "Authorization: Token a8f3k2m9q7x1z5",
+            "Authorization: ApiKey k_1234567890abcdef",
+            "Authorization: rawSecret9876543210",
+        ):
+            cats = {f["category"] for f in dlp.scan(real_hdr, None)}
+            self.assertIn("jwt_bearer", cats, f"yakalanmadi: {real_hdr}")
+
+        # TR IBAN ISO 7064 Mod-97 kontrol hanesi dogrulamasi
+        self.assertTrue(dlp.valid_tr_iban("TR33 0006 1005 1978 6457 8413 26"))
+        self.assertFalse(dlp.valid_tr_iban("TR00 0006 1005 1978 6457 8413 26"))
+        self.assertEqual(dlp.scan("ornek TR00 0006 1005 1978 6457 8413 26 gecersiz", None), [])
+
 
 if __name__ == "__main__":
     unittest.main()
