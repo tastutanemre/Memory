@@ -286,6 +286,53 @@ class McpInProcessTests(IsolatedCase):
         self.assertEqual(r3["status"], "removed")
         self.assertNotIn("Yeni MCP kuralı", (self.root / "Kurallar.md").read_text(encoding="utf-8"))
 
+    def test_call_tool_empty_message_errors_return_nonempty_is_error(self):
+        import shutil
+        import sqlite3
+        from unittest import mock
+
+        with mock.patch.object(vault, "read_note", side_effect=FileNotFoundError()):
+            r1 = self.server.call_tool("memory_read", {"path": "Core.md", "cwd": str(self.repo)})
+        self.assertTrue(r1.get("isError"))
+        self.assertIn("FileNotFoundError", text_of(r1))
+        self.assertTrue(text_of(r1).split(":", 1)[1].strip())
+
+        with mock.patch.object(vault, "search_memory", side_effect=sqlite3.OperationalError("")):
+            r2 = self.server.call_tool("memory_search", {"query": "test", "cwd": str(self.repo)})
+        self.assertTrue(r2.get("isError"))
+        self.assertIn("OperationalError", text_of(r2))
+        self.assertTrue(text_of(r2).split(":", 1)[1].strip())
+
+        with mock.patch.object(vault, "record_decision", side_effect=shutil.Error("")):
+            r3 = self.server.call_tool("memory_decide", {
+                "title": "Test", "decision": "Karar", "cwd": str(self.repo),
+            })
+        self.assertTrue(r3.get("isError"))
+        self.assertIn("Error", text_of(r3))
+        self.assertTrue(text_of(r3).split(":", 1)[1].strip())
+
+    def test_run_stdio_reconfigures_stderr_to_utf8(self):
+        from unittest import mock
+        from mem.mcp_server import run_stdio
+
+        err_buf = io.BytesIO()
+        cp_err = io.TextIOWrapper(err_buf, encoding="cp1252", errors="strict")
+        req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": "memory_search", "arguments": {"query": "x", "cwd": str(self.repo)}}}).encode("utf-8") + b"\n"
+        fake_in = mock.Mock(buffer=io.BytesIO(req))
+        out_buf = io.BytesIO()
+        fake_out = mock.Mock(buffer=out_buf)
+
+        with mock.patch.object(sys, "stderr", cp_err), \
+             mock.patch.object(sys, "stdin", fake_in), \
+             mock.patch.object(sys, "stdout", fake_out), \
+             mock.patch.object(vault, "search_memory", side_effect=RuntimeError("Türkçe çğıöşü hata")):
+            code = run_stdio(self.root, self.state)
+
+        self.assertEqual(code, 0)
+        cp_err.flush()
+        self.assertIn("Türkçe çğıöşü hata", err_buf.getvalue().decode("utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

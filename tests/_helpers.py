@@ -20,6 +20,7 @@ import mem  # noqa: E402
 assert Path(mem.__file__).resolve().is_relative_to(SRC), "mem paketi src/ altindan yuklenmeli"
 
 from mem import config, vault  # noqa: E402
+from mem.lock import _win_ext_path  # noqa: E402
 
 
 ISOLATED_ENV = (
@@ -46,7 +47,8 @@ class IsolatedCase(unittest.TestCase):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        shutil.rmtree(self._tmp, ignore_errors=True)
+        rm_target = _win_ext_path(Path(self._tmp)) if os.name == "nt" else self._tmp
+        shutil.rmtree(rm_target, ignore_errors=True)
 
     def make_vault(self, profile: str = "work", name: str = "vault", dlp_mode: str | None = None):
         root = self.tmp / name
