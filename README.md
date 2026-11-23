@@ -140,22 +140,40 @@ Gerçek projelerde `Acik-Konular.md` hem insan/mimari notlarını (alt başlıkl
 
 ## 4. Adım Adım Kurulum Rehberi
 
-### 4.0. Yapay Zekâ Ajanına Tek Cümleyle Kurdurma veya Güncelletme (`mem setup`)
+### 4.0. Yapay Zekâ Ajanı ile Otonom Kurulum ve Güncelleme (`mem setup`)
 
-Repo kökündeki [`AGENTS.md`](./AGENTS.md) dosyası, tüm kodlama ajanlarının (Devin Desktop, Claude Code, Codex, Antigravity) mevcut kurulumunuzu algılayıp sıfır veri kaybıyla kurulum veya güncelleme yapabilmesi için deterministik adımları içerir. Ajanınıza doğrudan şu cümlelerden birini yazabilirsiniz:
+Herhangi bir kodlama ajanına (`Devin Desktop`, `Claude Code`, `Codex`, `Antigravity`) bu bölümdeki adımları izlemesini söyleyerek kurulumu veya güncellemeyi devredebilirsiniz:
 
-- **İlk kurulum:** *"Bu repoyu çalışma ortamıma kur (personal profil, aktif proje: order-service)"*
-- **Güncelleme:** *"Bende kurulu mem'i güncelle"*
+- **İlk kurulum istemi:** *"https://github.com/tastutanemre/Memory reposundaki README §4.0 adımlarını izleyerek bu aracı çalışma ortamıma kur."*
+- **Güncelleme istemi:** *"Bende kurulu olan mem motorunu README §4.0 adımlarını izleyerek son sürüme güncelle."*
 
-Komutu kendiniz tek seferde çalıştırmak isterseniz `mem setup`; profil ve kasayı oluşturur (varsa korur), `--project` ile verilen projeleri beyaz listeye ekler, diskinizde kurulu istemcileri otomatik algılayıp `--harness` kimliğiyle bağlar (başka profile bağlı istemcileri ezmez), global `skills/memory/SKILL.md` dosyasını eşitler ve indeksi senkronize eder:
-
-```bash
-# Tek komutla ilk kurulum (kurulu istemciler + global SKILL.md otomatik eklenir)
-python mem.py setup --profile personal --vault ~/MemVault/personal --project order-service=/dev/repos/order-service
-
-# Mevcut kurulumu güncelleme (mevcut Core.md, Kurallar.md ve diğer profile bağlı istemciler korunur)
-python mem.py setup
-```
+#### Ajanlar İçin Deterministik Kurulum / Güncelleme Protokolü
+1. **Önce Mevcut Kurulumu Keşfet (İkinci Klon Açma):**
+   - Profil kaydına (`%LOCALAPPDATA%\mem-engine\profiles.json` veya `~/.local/share/mem-engine/profiles.json`) ve istemci MCP ayar dosyalarındaki mevcut `mem.py` yoluna bak:
+     - **Devin Desktop:** `%APPDATA%\devin\mcp_config.json` *(POSIX: `~/.config/devin/mcp_config.json`)*
+     - **Claude Code:** `~/.claude.json`
+     - **Claude Desktop:** `%LOCALAPPDATA%\Claude-Data\claude_*\claude_desktop_config.json` veya `%APPDATA%\Claude\claude_desktop_config.json` *(macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`)*
+     - **Codex:** `~/.codex/config.toml`
+     - **Antigravity:** `~/.gemini/config/mcp_config.json`
+   - Mevcut bir `mem.py` klonu tanımlıysa yeni klasöre klonlama; doğrudan mevcut repo dizinine geç.
+2. **Kurulu Ortamı Güncelleme:**
+   - Mevcut repo dizininde çalışma ağacının temiz olduğunu (`git status --porcelain` boş) **ve** aktif dalın `main` olduğunu (`git rev-parse --abbrev-ref HEAD` çıktısı `main`) doğrula; başka bir dalda veya kirli durumdaysa **işlem yapmadan kullanıcıya sor**.
+   - Güncel kodu çek ve yalnızca halihazırda bağlı olan istemcileri + `SKILL.md` kopyalarını yenile:
+     ```bash
+     git pull --ff-only origin main
+     python mem.py setup
+     python mem.py doctor
+     ```
+     *(Varsayılan dışındaki bir profili güncelliyorsan hem `setup` hem `doctor` komutuna aynı `--profile <ad>` değerini geçir.)*
+3. **Sıfırdan İlk Kurulum:**
+   - Repo henüz diskte yoksa uygun bir araç dizinine klonla (kasayı asla repo içine kurma).
+   - **Tahmin etme, sor:** Kullanıcının cümlesinde açıkça belirtilmemişse hangi profili (`work` [`dlp: block`] veya `personal` [`dlp: redact`]) ve algılanan kurulu istemcilerden hangilerini bağlamak istediğini sor (`python mem.py setup --profile <work|personal> --dry-run` çıktısındaki `unconnected_detected` listesini göster).
+   - Yalnızca onaylanan istemcileri `--harness <ad>` (veya kullanıcı tümünü isterse `--all-harnesses`) ile bağla ve doğrula *(proje slug'ı otomatik olarak küçük harfe normalize edilir)*:
+     ```bash
+     python mem.py setup --profile work --vault ~/MemVault/work --project order-service=/dev/repos/order-service --harness devin
+     python mem.py doctor --profile work
+     ```
+   - Son olarak kullanıcıya açık olan istemci uygulamalarını bir kez yeniden başlatmasını bildir.
 
 ### 4.1. Gereksinimler ve İndirme
 - **Python 3.11 veya üzeri** (Windows, macOS veya Linux; standart SQLite FTS5 desteğiyle gelir).
@@ -365,7 +383,7 @@ python mem.py compact --profile personal --days 14 [--project order-service] [--
 python mem.py sync --profile personal
 
 # Araç bağlama, tek komut kurulum/güncelleme, eski kasa aktarımı ve MCP sunucusu
-python mem.py setup --profile personal [--vault ~/MemVault/personal] [--dlp redact|block] [--project order-service=/dev/order-service] [--harness claude] [--no-skill] [--dry-run]
+python mem.py setup --profile personal [--vault ~/MemVault/personal] [--dlp redact|block] [--project order-service=/dev/order-service] [--harness claude] [--all-harnesses] [--no-skill] [--dry-run]
 python mem.py connect <claude|claude-desktop|codex|antigravity|devin> --profile personal [--advisor off|gemini] [--with-skill] [--dry-run] [--uninstall]
 python mem.py import-v3 /eski/kasa/yolu --profile personal [--dry-run]
 python mem.py mcp --profile personal --harness claude [--vault-scope] [--advisor off|gemini]

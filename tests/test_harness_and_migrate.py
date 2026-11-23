@@ -368,33 +368,54 @@ class SetupAndSkillTests(IsolatedCase):
         self.assertTrue((skill_dst.with_name("SKILL.md.bak")).exists())
         self.assertTrue(any(f["path"] == str(skill_dst) and f["action"] == "removed" for f in un["files"]))
 
+        # mem tarafindan kurulmamis yabanci SKILL.md uninstall sirasinda silinmemeli
+        skill_dst.parent.mkdir(parents=True, exist_ok=True)
+        skill_dst.write_text("---\nname: custom-memory\n---\nBaska bir aracin skill dosyasi.\n", encoding="utf-8")
+        un_foreign = harness.connect_harness("claude", "personal", config_root_override=cfg, uninstall=True)
+        self.assertTrue(skill_dst.is_file())
+        self.assertTrue(any(f["path"] == str(skill_dst) and f["action"] == "skipped_foreign" for f in un_foreign["files"]))
+
         # claude-desktop icin skill yolu None
         res_cd = harness.connect_harness("claude-desktop", "personal", config_root_override=cfg, install_skill=True)
         self.assertEqual(len(res_cd["files"]), 1)
 
-    def test_setup_fresh_install_auto_detects_harnesses_and_installs_skill(self):
+    def test_setup_fresh_install_requires_explicit_harness_or_all_harnesses(self):
         cfg = self.tmp / "cfg-fresh"
         (cfg / "devin").mkdir(parents=True)
         (cfg / ".claude").mkdir(parents=True)
         vault_dir = self.tmp / "work-vault"
         repo = self.make_repo("order-svc")
 
-        code, out = self._run_cli([
+        # 1) --harness verilmeden taze kurulum: hicbir araca sormadan baglanmaz, unconnected_detected doner
+        # Ayrica buyuk harfli slug `repoA=...` kucuk harfe (`repoa`) normalize edilmeli
+        code0, out0 = self._run_cli([
             "setup", "--profile", "work", "--vault", str(vault_dir),
-            "--project", f"order-svc={repo}", "--config-root", str(cfg), "--json",
+            "--project", f"repoA={repo}", "--config-root", str(cfg), "--json",
+        ])
+        self.assertEqual(code0, 0)
+        self.assertEqual(out0["mode"], "installed")
+        self.assertEqual(out0["connected"], [])
+        self.assertEqual(out0["unconnected_detected"], ["devin", "claude"])
+        self.assertFalse((cfg / "devin" / "mcp_config.json").exists())
+        self.assertFalse((cfg / ".claude.json").exists())
+        projects = config.load_projects(vault_dir)
+        self.assertEqual([p["slug"] for p in projects], ["repoa"])
+        self.assertEqual(projects[0]["roots"], [str(repo).replace("\\", "/")])
+
+        # 2) --all-harnesses ile kurulu ve baska profile bagli olmayan tum araclari baglar
+        code, out = self._run_cli([
+            "setup", "--profile", "work", "--all-harnesses",
+            "--config-root", str(cfg), "--json",
         ])
         self.assertEqual(code, 0)
-        self.assertEqual(out["mode"], "installed")
+        self.assertEqual(out["mode"], "upgraded")
         self.assertEqual(out["profile"], "work")
         self.assertEqual(out["dlp_mode"], "block")
         self.assertEqual(config.read_vault_meta(vault_dir)["dlp_mode"], "block")
         self.assertEqual(config.get_profile("work").dlp_mode, "block")
 
-        projects = config.load_projects(vault_dir)
-        self.assertEqual([p["slug"] for p in projects], ["order-svc"])
-        self.assertEqual(projects[0]["roots"], [str(repo).replace("\\", "/")])
-
         self.assertEqual([c["harness"] for c in out["connected"]], ["devin", "claude"])
+        self.assertEqual(out["unconnected_detected"], [])
         self.assertEqual(out["skipped_other_profile"], [])
 
         devin_mcp = json.loads((cfg / "devin" / "mcp_config.json").read_text(encoding="utf-8"))
@@ -413,8 +434,9 @@ class SetupAndSkillTests(IsolatedCase):
         self.assertFalse((cfg / ".gemini").exists())
         self.assertFalse((cfg / "claude-desktop").exists())
 
-    def test_setup_idempotent_upgrade_preserves_vault_and_skips_other_profile_harness(self):
+    def test_setup_idempotent_upgrade_preserves_vault_and_skips_unconnected_or_other_profile(self):
         cfg = self.tmp / "cfg-upg"
+        (cfg / "devin").mkdir(parents=True)  # kurulu ama mem'e bagli degil -> sormadan baglanmamali!
         (cfg / ".claude").mkdir(parents=True)
         (cfg / ".codex").mkdir(parents=True)
 
@@ -422,9 +444,9 @@ class SetupAndSkillTests(IsolatedCase):
         custom_core = "# Core\n\nÖzel kullanıcı tercihi: Kısa yanıt ver.\n"
         (vroot / "Core.md").write_text(custom_core, encoding="utf-8")
 
-        # Eski tarz --harness icermeyen claude kaydi ve baska profile bagli codex kaydi
+        # Eski tarz --profile ve --harness icermeyen claude kaydi (varsayilan profil work -> claude'u sahiplenir)
         (cfg / ".claude.json").write_text(
-            json.dumps({"mcpServers": {"mem": {"command": sys.executable, "args": [str(MEM_PY), "mcp", "--profile", "work"]}}}),
+            json.dumps({"mcpServers": {"mem": {"command": sys.executable, "args": [str(MEM_PY), "mcp"]}}}),
             encoding="utf-8",
         )
         harness.connect_harness("codex", "personal", config_root_override=cfg)
@@ -437,20 +459,60 @@ class SetupAndSkillTests(IsolatedCase):
         self.assertEqual((vroot / "Core.md").read_text(encoding="utf-8"), custom_core)
 
         self.assertEqual([c["harness"] for c in out["connected"]], ["claude"])
+        self.assertEqual(out["unconnected_detected"], ["devin"])
+        self.assertFalse((cfg / "devin" / "mcp_config.json").exists())
         self.assertEqual(out["skipped_other_profile"], [{"harness": "codex", "profile": "personal"}])
+
+        # personal profili de kuruldugunda varsayilan work olan eski kayit personal tarafindan calinmamali
+        v_pers = self.tmp / "pers-vault"
+        code_p, out_p = self._run_cli([
+            "setup", "--profile", "personal", "--vault", str(v_pers), "--config-root", str(cfg), "--json",
+        ])
+        self.assertEqual(code_p, 0)
+        self.assertEqual([c["harness"] for c in out_p["connected"]], ["codex"])
+        self.assertIn({"harness": "claude", "profile": "work"}, out_p["skipped_other_profile"])
 
         claude_mcp = json.loads((cfg / ".claude.json").read_text(encoding="utf-8"))
         self.assertIn("--harness", claude_mcp["mcpServers"]["mem"]["args"])
         self.assertIn("claude", claude_mcp["mcpServers"]["mem"]["args"])
         self.assertTrue((cfg / ".claude" / "skills" / "memory" / "SKILL.md").is_file())
-        self.assertEqual((cfg / ".codex" / "config.toml").read_text(encoding="utf-8"), codex_before)
 
         # Idempotent ikinci calistirma
         code2, out2 = self._run_cli(["setup", "--config-root", str(cfg), "--json"])
         self.assertEqual(code2, 0)
         self.assertEqual(out2["mode"], "upgraded")
         self.assertEqual({f["action"] for f in out2["connected"][0]["files"]}, {"unchanged"})
-        self.assertEqual(out2["skipped_other_profile"], [{"harness": "codex", "profile": "personal"}])
+
+    def test_setup_vault_metadata_reconcile_unmanaged_codex_and_dry_run_proposed_dlp(self):
+        cfg = self.tmp / "cfg-edge"
+        (cfg / ".codex").mkdir(parents=True)
+        # Elle yazilmis isaretsiz [mcp_servers.mem] tablosu -> otomatik guncellemede skipped_unmanaged olmali
+        (cfg / ".codex" / "config.toml").write_text(
+            '[mcp_servers.mem]\ncommand = "python"\nargs = ["mem.py", "mcp", "--profile", "personal"]\n',
+            encoding="utf-8",
+        )
+        v_pers, _ = self.make_vault("personal", name="v-pers", dlp_mode="block")
+        # Kayitli profil block iken --dlp redact --advisor gemini --dry-run onizlemesi basarili olmali (diske yazmadan)
+        code_dry, out_dry = self._run_cli([
+            "setup", "--profile", "personal", "--dlp", "redact", "--advisor", "gemini",
+            "--harness", "claude", "--config-root", str(cfg), "--dry-run", "--json",
+        ])
+        self.assertEqual(code_dry, 0)
+        self.assertEqual(out_dry["dlp_mode"], "redact")
+        self.assertEqual(config.read_vault_meta(v_pers)["dlp_mode"], "block")
+
+        # --dlp verilmeden --advisor off calistirildiginda kasadaki kati `block` degeri ezilmemeli + codex skipped_unmanaged
+        code_u, out_u = self._run_cli([
+            "setup", "--profile", "personal", "--advisor", "off", "--config-root", str(cfg), "--json",
+        ])
+        self.assertEqual(code_u, 0)
+        self.assertEqual(config.read_vault_meta(v_pers)["dlp_mode"], "block")
+        self.assertEqual(len(out_u["skipped_unmanaged"]), 1)
+        self.assertEqual(out_u["skipped_unmanaged"][0]["harness"], "codex")
+
+        # Baska kimlige ait mevcut kasayi yeni profile baglamayi reddetmeli (EXIT_USAGE = 2)
+        rc = cli.main(["setup", "--profile", "work", "--vault", str(v_pers), "--config-root", str(cfg)])
+        self.assertEqual(rc, cli.EXIT_USAGE)
 
     def test_setup_dry_run_no_skill_auto_slug_and_explicit_harness_override(self):
         cfg = self.tmp / "cfg-opts"

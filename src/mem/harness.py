@@ -118,10 +118,26 @@ def _extract_profile_arg(args) -> str:
     return ""
 
 
-def connected_harness_profile(harness: str, config_root_override=None) -> str | None:
-    """İstemci MCP ayarında `mem` sunucusu tanımlıysa `--profile` değerini döndürür.
+def _extract_entry_profile(mem_entry: dict) -> str:
+    prof = _extract_profile_arg(mem_entry.get("args"))
+    if prof:
+        return prof
+    env = mem_entry.get("env")
+    if isinstance(env, dict):
+        env_prof = env.get("MEM_PROFILE")
+        if isinstance(env_prof, str) and env_prof.strip():
+            return env_prof.strip()
+    return ""
 
-    Tanımlı değilse veya okunamazsa `None`, tanımlı ama `--profile` yoksa `""` döndürür.
+
+def _is_mem_skill(text: str) -> bool:
+    return "memory_bootstrap" in text and "name: memory" in text
+
+
+def connected_harness_profile(harness: str, config_root_override=None) -> str | None:
+    """İstemci MCP ayarında `mem` sunucusu tanımlıysa `--profile` (veya `env.MEM_PROFILE`) değerini döndürür.
+
+    Tanımlı değilse veya okunamazsa `None`, tanımlı ama açık profil yoksa `""` döndürür.
     """
     t = _targets(harness, config_root_override)
     mcp_path: Path = t["mcp"]
@@ -142,7 +158,7 @@ def connected_harness_profile(harness: str, config_root_override=None) -> str | 
         mem_entry = servers.get("mem")
         if not isinstance(mem_entry, dict):
             return None
-        return _extract_profile_arg(mem_entry.get("args"))
+        return _extract_entry_profile(mem_entry)
     try:
         data = tomllib.loads(text.lstrip("\ufeff"))
     except tomllib.TOMLDecodeError:
@@ -153,7 +169,7 @@ def connected_harness_profile(harness: str, config_root_override=None) -> str | 
     mem_entry = servers.get("mem")
     if not isinstance(mem_entry, dict):
         return None
-    return _extract_profile_arg(mem_entry.get("args"))
+    return _extract_entry_profile(mem_entry)
 
 
 def _targets(harness: str, override) -> dict:
@@ -243,7 +259,8 @@ def _toml_block(entry: dict) -> str:
             f"args = [{args}]\n{TOML_END}\n")
 
 
-def _validate_connect_advisor(profile_name: str, advisor: str | None) -> str | None:
+def _validate_connect_advisor(profile_name: str, advisor: str | None,
+                              proposed_dlp: str | None = None) -> str | None:
     if advisor is None or advisor == "":
         return None
     if not isinstance(advisor, str):
@@ -255,6 +272,8 @@ def _validate_connect_advisor(profile_name: str, advisor: str | None) -> str | N
         return "off"
     if (profile_name or "").strip().lower() == "work":
         raise ValueError("`work` profili harici danisman (advisor) ile baglanamaz; hava bosluklu kalir.")
+    if proposed_dlp is not None:
+        return config.validate_advisor_mode(adv, profile_name, proposed_dlp)
     try:
         prof = config.get_profile(profile_name) if profile_name else None
     except config.ProfileError:
@@ -272,13 +291,14 @@ def _validate_connect_advisor(profile_name: str, advisor: str | None) -> str | N
 
 def connect_harness(harness: str, profile_name: str, config_root_override=None, dry_run: bool = False,
                     uninstall: bool = False, mem_py_path=None, python_exe: str | None = None,
-                    advisor: str | None = None, install_skill: bool = False) -> dict:
+                    advisor: str | None = None, install_skill: bool = False,
+                    proposed_dlp: str | None = None) -> dict:
     """MCP kaydi + global kural blogu yazar (veya uninstall ile yalniz kendi kayitlarini kaldirir).
 
     Acik `advisor` ("gemini" veya "off") verilirse MCP argumanlarina yazilir; `None` ise profil varsayilani korunur.
     `install_skill=True` iken (ve desteklenen istemcilerde) global `skills/memory/SKILL.md` de kurulur/guncellenir.
     """
-    adv = None if uninstall else _validate_connect_advisor(profile_name, advisor)
+    adv = None if uninstall else _validate_connect_advisor(profile_name, advisor, proposed_dlp=proposed_dlp)
     t = _targets(harness, config_root_override)
     mem_py = Path(mem_py_path) if mem_py_path else default_mem_py()
     entry = _mcp_entry(profile_name, mem_py, python_exe or sys.executable,
@@ -326,7 +346,10 @@ def connect_harness(harness: str, profile_name: str, config_root_override=None, 
         if uninstall:
             sorig = _read(skill_dst)
             if sorig is not None:
-                files.append(_apply(skill_dst, sorig, "", dry_run, True))
+                if _is_mem_skill(sorig):
+                    files.append(_apply(skill_dst, sorig, "", dry_run, True))
+                else:
+                    files.append({"path": str(skill_dst), "action": "skipped_foreign"})
         elif install_skill:
             skill_src = default_skill_source(mem_py)
             if skill_src.is_file():
