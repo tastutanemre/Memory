@@ -140,6 +140,23 @@ Gerçek projelerde `Acik-Konular.md` hem insan/mimari notlarını (alt başlıkl
 
 ## 4. Adım Adım Kurulum Rehberi
 
+### 4.0. Yapay Zekâ Ajanına Tek Cümleyle Kurdurma veya Güncelletme (`mem setup`)
+
+Repo kökündeki [`AGENTS.md`](./AGENTS.md) dosyası, tüm kodlama ajanlarının (Devin Desktop, Claude Code, Codex, Antigravity) mevcut kurulumunuzu algılayıp sıfır veri kaybıyla kurulum veya güncelleme yapabilmesi için deterministik adımları içerir. Ajanınıza doğrudan şu cümlelerden birini yazabilirsiniz:
+
+- **İlk kurulum:** *"Bu repoyu çalışma ortamıma kur (personal profil, aktif proje: order-service)"*
+- **Güncelleme:** *"Bende kurulu mem'i güncelle"*
+
+Komutu kendiniz tek seferde çalıştırmak isterseniz `mem setup`; profil ve kasayı oluşturur (varsa korur), `--project` ile verilen projeleri beyaz listeye ekler, diskinizde kurulu istemcileri otomatik algılayıp `--harness` kimliğiyle bağlar (başka profile bağlı istemcileri ezmez), global `skills/memory/SKILL.md` dosyasını eşitler ve indeksi senkronize eder:
+
+```bash
+# Tek komutla ilk kurulum (kurulu istemciler + global SKILL.md otomatik eklenir)
+python mem.py setup --profile personal --vault ~/MemVault/personal --project order-service=/dev/repos/order-service
+
+# Mevcut kurulumu güncelleme (mevcut Core.md, Kurallar.md ve diğer profile bağlı istemciler korunur)
+python mem.py setup
+```
+
 ### 4.1. Gereksinimler ve İndirme
 - **Python 3.11 veya üzeri** (Windows, macOS veya Linux; standart SQLite FTS5 desteğiyle gelir).
 - Harici paket kurulumu (`pip install`) **gerekmez**.
@@ -223,7 +240,7 @@ python mem.py connect devin --profile personal
 | `devin` | `%APPDATA%\devin\mcp_config.json` *(POSIX: `~/.config/devin/mcp_config.json`)* | `.../devin/AGENTS.md` | Devin Desktop |
 
 - **Önizleme ve Kaldırma:** Dosyalara dokunmadan ne değişeceğini görmek için `--dry-run`, yalnızca `mem` kayıtlarını temiz biçimde kaldırmak için `--uninstall` ekleyin.
-- **Skill Dosyası:** İsteğe bağlı olarak `skills/memory/SKILL.md` dosyasını aracınızın global `skills/memory/SKILL.md` klasörüne kopyalayabilirsiniz.
+- **Skill Dosyası:** `connect` komutuna `--with-skill` ekleyerek `skills/memory/SKILL.md` dosyasını aracınızın global `skills/memory/SKILL.md` klasörüne de kurabilirsiniz (`mem setup` komutu `--no-skill` verilmedikçe bunu otomatik yapar).
 - **İstemci Yeniden Başlatma:** `connect` çalıştırdıktan sonra açık olan IDE/masaüstü istemcilerini (Windows'ta sistem tepsisinde çalışan Claude Desktop dahil) bir kez yeniden başlatın.
 
 ### 4.5. Kurulumu Doğrulayın (`doctor`)
@@ -347,8 +364,9 @@ python mem.py finish --cwd /dev/order-service --summary "İade akışı tamamlan
 python mem.py compact --profile personal --days 14 [--project order-service] [--dry-run]
 python mem.py sync --profile personal
 
-# Araç bağlama, eski kasa aktarımı ve MCP sunucusu
-python mem.py connect <claude|claude-desktop|codex|antigravity|devin> --profile personal [--advisor off|gemini] [--dry-run] [--uninstall]
+# Araç bağlama, tek komut kurulum/güncelleme, eski kasa aktarımı ve MCP sunucusu
+python mem.py setup --profile personal [--vault ~/MemVault/personal] [--dlp redact|block] [--project order-service=/dev/order-service] [--harness claude] [--no-skill] [--dry-run]
+python mem.py connect <claude|claude-desktop|codex|antigravity|devin> --profile personal [--advisor off|gemini] [--with-skill] [--dry-run] [--uninstall]
 python mem.py import-v3 /eski/kasa/yolu --profile personal [--dry-run]
 python mem.py mcp --profile personal --harness claude [--vault-scope] [--advisor off|gemini]
 ```
