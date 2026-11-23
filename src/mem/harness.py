@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tomllib
 from pathlib import Path
 
 from . import config
@@ -71,6 +72,104 @@ def _claude_desktop_config(override) -> Path:
 
 def default_mem_py() -> Path:
     return Path(__file__).resolve().parents[2] / "mem.py"
+
+
+def default_skill_source(mem_py_path=None) -> Path:
+    mp = Path(mem_py_path) if mem_py_path else default_mem_py()
+    return mp.resolve().parent / "skills" / "memory" / "SKILL.md"
+
+
+def _skill_path(harness: str, override) -> Path | None:
+    home = _home(override)
+    if harness == "devin":
+        return _devin_dir(override) / "skills" / "memory" / "SKILL.md"
+    if harness == "antigravity":
+        return home / ".gemini" / "config" / "skills" / "memory" / "SKILL.md"
+    if harness == "claude":
+        return home / ".claude" / "skills" / "memory" / "SKILL.md"
+    if harness == "codex":
+        return home / ".codex" / "skills" / "memory" / "SKILL.md"
+    if harness == "claude-desktop":
+        return None
+    raise ValueError(f"Bilinmeyen harness: {harness!r}. Seçenekler: {', '.join(HARNESSES)}")
+
+
+def detect_installed_harnesses(config_root_override=None) -> list[str]:
+    """Diskte kurulu olan istemcileri HARNESSES sırasıyla tespit eder (olmayan klasör yaratmaz)."""
+    home = _home(config_root_override)
+    checks = {
+        "devin": _devin_dir(config_root_override).is_dir(),
+        "antigravity": (home / ".gemini").is_dir(),
+        "claude": (home / ".claude").is_dir() or (home / ".claude.json").is_file(),
+        "claude-desktop": _claude_desktop_config(config_root_override).parent.is_dir(),
+        "codex": (home / ".codex").is_dir(),
+    }
+    return [h for h in HARNESSES if checks.get(h)]
+
+
+def _extract_profile_arg(args) -> str:
+    if not isinstance(args, list):
+        return ""
+    for i, item in enumerate(args):
+        if item == "--profile" and i + 1 < len(args) and isinstance(args[i + 1], str):
+            return args[i + 1]
+        if isinstance(item, str) and item.startswith("--profile="):
+            return item.split("=", 1)[1]
+    return ""
+
+
+def _extract_entry_profile(mem_entry: dict) -> str:
+    prof = _extract_profile_arg(mem_entry.get("args"))
+    if prof:
+        return prof
+    env = mem_entry.get("env")
+    if isinstance(env, dict):
+        env_prof = env.get("MEM_PROFILE")
+        if isinstance(env_prof, str) and env_prof.strip():
+            return env_prof.strip()
+    return ""
+
+
+def _is_mem_skill(text: str) -> bool:
+    return "memory_bootstrap" in text and "name: memory" in text
+
+
+def connected_harness_profile(harness: str, config_root_override=None) -> str | None:
+    """İstemci MCP ayarında `mem` sunucusu tanımlıysa `--profile` (veya `env.MEM_PROFILE`) değerini döndürür.
+
+    Tanımlı değilse veya okunamazsa `None`, tanımlı ama açık profil yoksa `""` döndürür.
+    """
+    t = _targets(harness, config_root_override)
+    mcp_path: Path = t["mcp"]
+    try:
+        text = _read(mcp_path)
+    except (OSError, UnicodeDecodeError):
+        return None
+    if text is None:
+        return None
+    if t["mcp_kind"] == "json":
+        try:
+            data = _json_load(mcp_path, text)
+        except ValueError:
+            return None
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict):
+            return None
+        mem_entry = servers.get("mem")
+        if not isinstance(mem_entry, dict):
+            return None
+        return _extract_entry_profile(mem_entry)
+    try:
+        data = tomllib.loads(text.lstrip("\ufeff"))
+    except tomllib.TOMLDecodeError:
+        return None
+    servers = data.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return None
+    mem_entry = servers.get("mem")
+    if not isinstance(mem_entry, dict):
+        return None
+    return _extract_entry_profile(mem_entry)
 
 
 def _targets(harness: str, override) -> dict:
@@ -160,7 +259,8 @@ def _toml_block(entry: dict) -> str:
             f"args = [{args}]\n{TOML_END}\n")
 
 
-def _validate_connect_advisor(profile_name: str, advisor: str | None) -> str | None:
+def _validate_connect_advisor(profile_name: str, advisor: str | None,
+                              proposed_dlp: str | None = None) -> str | None:
     if advisor is None or advisor == "":
         return None
     if not isinstance(advisor, str):
@@ -172,6 +272,8 @@ def _validate_connect_advisor(profile_name: str, advisor: str | None) -> str | N
         return "off"
     if (profile_name or "").strip().lower() == "work":
         raise ValueError("`work` profili harici danisman (advisor) ile baglanamaz; hava bosluklu kalir.")
+    if proposed_dlp is not None:
+        return config.validate_advisor_mode(adv, profile_name, proposed_dlp)
     try:
         prof = config.get_profile(profile_name) if profile_name else None
     except config.ProfileError:
@@ -189,12 +291,14 @@ def _validate_connect_advisor(profile_name: str, advisor: str | None) -> str | N
 
 def connect_harness(harness: str, profile_name: str, config_root_override=None, dry_run: bool = False,
                     uninstall: bool = False, mem_py_path=None, python_exe: str | None = None,
-                    advisor: str | None = None) -> dict:
+                    advisor: str | None = None, install_skill: bool = False,
+                    proposed_dlp: str | None = None) -> dict:
     """MCP kaydi + global kural blogu yazar (veya uninstall ile yalniz kendi kayitlarini kaldirir).
 
     Acik `advisor` ("gemini" veya "off") verilirse MCP argumanlarina yazilir; `None` ise profil varsayilani korunur.
+    `install_skill=True` iken (ve desteklenen istemcilerde) global `skills/memory/SKILL.md` de kurulur/guncellenir.
     """
-    adv = None if uninstall else _validate_connect_advisor(profile_name, advisor)
+    adv = None if uninstall else _validate_connect_advisor(profile_name, advisor, proposed_dlp=proposed_dlp)
     t = _targets(harness, config_root_override)
     mem_py = Path(mem_py_path) if mem_py_path else default_mem_py()
     entry = _mcp_entry(profile_name, mem_py, python_exe or sys.executable,
@@ -235,6 +339,22 @@ def connect_harness(harness: str, profile_name: str, config_root_override=None, 
         roriginal = _read(rules_path)
         rnew = _upsert_block(roriginal, RULE_BLOCK, BLOCK_START, BLOCK_END, uninstall)
         files.append(_apply(rules_path, roriginal, rnew, dry_run, uninstall))
+
+    # --- global skill dosyasi
+    skill_dst = _skill_path(harness, config_root_override)
+    if skill_dst is not None:
+        if uninstall:
+            sorig = _read(skill_dst)
+            if sorig is not None:
+                if _is_mem_skill(sorig):
+                    files.append(_apply(skill_dst, sorig, "", dry_run, True))
+                else:
+                    files.append({"path": str(skill_dst), "action": "skipped_foreign"})
+        elif install_skill:
+            skill_src = default_skill_source(mem_py)
+            if skill_src.is_file():
+                stext = skill_src.read_text(encoding="utf-8").replace("\r\n", "\n")
+                files.append(_apply(skill_dst, _read(skill_dst), stext, dry_run, False))
 
     return {"harness": harness, "profile": profile_name, "uninstall": uninstall, "dry_run": dry_run,
             "mcp_entry": entry, "files": files}

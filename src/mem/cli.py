@@ -215,9 +215,208 @@ def cmd_sync(args) -> int:
 def cmd_connect(args) -> int:
     res = harness.connect_harness(args.harness, args.profile or "work", config_root_override=args.config_root,
                                   dry_run=args.dry_run, uninstall=args.uninstall,
-                                  advisor=args.advisor)
+                                  advisor=args.advisor, install_skill=args.with_skill)
     lines = [f"{f['action']:10} {f['path']}" for f in res["files"]]
     _out(args, res, "\n".join(lines))
+    return EXIT_OK
+
+
+def _parse_project_spec(spec: str) -> tuple[str, str]:
+    if "=" in spec:
+        left, right = spec.split("=", 1)
+        if left.strip() and "/" not in left and "\\" not in left and ":" not in left:
+            if not right.strip():
+                raise vault.VaultError(f"Geçersiz --project değeri (boş yol): {spec!r}")
+            return vault.slugify(left.strip(), 63), right
+    raw_path = spec
+    slug = vault.slugify(Path(raw_path).resolve().name, 63)
+    return slug, raw_path
+
+
+def _resolve_profileless_owner() -> str:
+    try:
+        return config.get_profile(None).name
+    except config.ProfileError:
+        return "<belirsiz>"
+
+
+def cmd_setup(args) -> int:
+    existing_profiles = {p.name: p for p in config.list_profiles()}
+    if args.profile:
+        profile_name = args.profile
+    else:
+        try:
+            profile_name = config.get_profile(None).name
+        except config.ProfileError:
+            if existing_profiles:
+                raise
+            profile_name = "work"
+
+    if not config.PROFILE_NAME_RE.match(profile_name or ""):
+        raise config.ProfileError(f"Gecersiz profil adi: {profile_name!r}")
+
+    if profile_name in existing_profiles:
+        mode = "upgraded"
+        prof = existing_profiles[profile_name]
+        root = Path(args.vault) if args.vault else Path(prof.vault_root)
+        mpath = config.vault_meta_path(root)
+        vmeta = config.read_vault_meta(root) if mpath.exists() else None
+        if vmeta is not None:
+            vprof = (vmeta.get("profile") or "").strip()
+            if vprof and vprof != profile_name:
+                raise ValueError(f"Hedef dizinde '{vprof}' profiline ait kasa zaten var: {root}")
+        stored_dlp = (vmeta.get("dlp_mode") if vmeta else None) or prof.dlp_mode
+        dlp_mode = args.dlp if args.dlp else stored_dlp
+        stored_adv = (vmeta.get("advisor") if vmeta and "advisor" in vmeta else None) or prof.advisor
+        adv_source = args.advisor if args.advisor is not None else (
+            "off" if not config.can_use_advisor(profile_name, dlp_mode) else stored_adv
+        )
+        adv = config.validate_advisor_mode(adv_source, profile_name, dlp_mode)
+        state_dir = Path(prof.state_dir)
+        config.ensure_state_outside(root, state_dir)
+        if not args.dry_run:
+            if args.vault or args.dlp or args.advisor:
+                prof = config.create_profile(profile_name, root, state_dir=prof.state_dir,
+                                             dlp_mode=dlp_mode, advisor=adv)
+                if mpath.exists():
+                    meta = config.read_vault_meta(root)
+                    if args.dlp:
+                        meta["dlp_mode"] = dlp_mode
+                    if adv == "off":
+                        meta.pop("advisor", None)
+                    else:
+                        meta["advisor"] = adv
+                    from .lock import atomic_write_text
+                    atomic_write_text(mpath, json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
+            vault.init_vault(root, profile_name, dlp_mode=dlp_mode, state_dir=prof.state_dir,
+                             advisor=adv)
+            state_dir = Path(prof.state_dir)
+    else:
+        mode = "installed"
+        root = Path(args.vault) if args.vault else config.default_vault_dir(profile_name)
+        mpath = config.vault_meta_path(root)
+        if mpath.exists():
+            vmeta = config.read_vault_meta(root)
+            vprof = (vmeta.get("profile") or "").strip()
+            vdlp = vmeta.get("dlp_mode") or config.default_dlp_mode(vprof or profile_name)
+            if vprof and vprof != profile_name:
+                raise ValueError(f"Hedef dizinde '{vprof}' profiline ait kasa zaten var: {root}")
+            if args.dlp and args.dlp != vdlp:
+                raise ValueError(f"Hedef kasadaki dlp_mode ({vdlp!r}) istenen --dlp ({args.dlp!r}) ile çelişiyor: {root}")
+            dlp_mode = vdlp
+            adv_req = args.advisor if args.advisor is not None else vmeta.get("advisor")
+        else:
+            dlp_mode = args.dlp or config.default_dlp_mode(profile_name)
+            adv_req = args.advisor
+        adv = config.validate_advisor_mode(adv_req, profile_name, dlp_mode)
+        state_dir = config.default_state_dir(profile_name)
+        config.ensure_state_outside(root, state_dir)
+        if not args.dry_run:
+            prof = config.create_profile(profile_name, root, dlp_mode=dlp_mode, advisor=adv)
+            vault.init_vault(root, profile_name, dlp_mode=prof.dlp_mode, state_dir=prof.state_dir,
+                             advisor=prof.advisor)
+            state_dir = Path(prof.state_dir)
+            dlp_mode = prof.dlp_mode
+
+    projects_added: list[dict] = []
+    for spec in args.project or []:
+        slug, raw_path = _parse_project_spec(spec)
+        norm_root = vault._norm_root(raw_path)
+        if args.dry_run:
+            projects_added.append({"status": "dry_run", "slug": slug, "roots": [norm_root]})
+        else:
+            projects_added.append(vault.register_project(root, slug, [norm_root], state_dir=state_dir))
+
+    unconnected_detected: list[str] = []
+    skipped_other_profile: list[dict] = []
+    skipped_unmanaged: list[dict] = []
+    if args.harness:
+        target_harnesses = list(dict.fromkeys(args.harness))
+    else:
+        target_harnesses = []
+        for h in harness.detect_installed_harnesses(args.config_root):
+            cprof = harness.connected_harness_profile(h, args.config_root)
+            if cprof is None:
+                if args.all_harnesses:
+                    target_harnesses.append(h)
+                else:
+                    unconnected_detected.append(h)
+            else:
+                owner = cprof if cprof else _resolve_profileless_owner()
+                if owner == profile_name:
+                    target_harnesses.append(h)
+                else:
+                    skipped_other_profile.append({"harness": h, "profile": owner})
+
+    connected: list[dict] = []
+    for h in target_harnesses:
+        try:
+            connected.append(
+                harness.connect_harness(
+                    h,
+                    profile_name,
+                    config_root_override=args.config_root,
+                    dry_run=args.dry_run,
+                    advisor=args.advisor,
+                    install_skill=not args.no_skill,
+                    proposed_dlp=dlp_mode,
+                )
+            )
+        except ValueError as exc:
+            if not args.harness and "[mcp_servers.mem]" in str(exc):
+                skipped_unmanaged.append({"harness": h, "reason": str(exc)})
+            else:
+                raise
+
+    sync_res = None if args.dry_run else vault.sync_index(root, state_dir)
+    out_mode = "dry_run" if args.dry_run else mode
+    out = {
+        "mode": out_mode,
+        "profile": profile_name,
+        "vault_root": str(root),
+        "state_dir": str(state_dir),
+        "dlp_mode": dlp_mode,
+        "connected": connected,
+        "unconnected_detected": unconnected_detected,
+        "skipped_other_profile": skipped_other_profile,
+        "skipped_unmanaged": skipped_unmanaged,
+        "projects_added": projects_added,
+        "sync": sync_res,
+    }
+    lines = [
+        f"Mod: {out_mode} | Profil: {profile_name} (dlp: {dlp_mode})",
+        f"Kasa: {root}",
+        f"State: {state_dir}",
+    ]
+    if projects_added:
+        lines.append("Projeler: " + ", ".join(f"{p['slug']} ({p['status']})" for p in projects_added))
+    if connected:
+        lines.append("Bağlanan/güncellenen istemciler:")
+        for c in connected:
+            fsum = ", ".join(f"{Path(f['path']).name}:{f['action']}" for f in c["files"])
+            lines.append(f"  - {c['harness']}: {fsum}")
+    else:
+        lines.append("Bağlanan istemci: (yok)")
+    if unconnected_detected:
+        lines.append(
+            "Algılanan ancak henüz bağlı olmayan istemciler (bağlamak için --harness <ad> veya --all-harnesses): "
+            + ", ".join(unconnected_detected)
+        )
+    if skipped_other_profile:
+        lines.append(
+            "Başka profile bağlı olduğu için atlananlar: "
+            + ", ".join(f"{s['harness']} ({s['profile']})" for s in skipped_other_profile)
+        )
+    if skipped_unmanaged:
+        lines.append(
+            "Elle yönetildiği için atlananlar: "
+            + ", ".join(f"{s['harness']}" for s in skipped_unmanaged)
+        )
+    if sync_res is not None:
+        lines.append("İndeks: " + ", ".join(f"{k}={v}" for k, v in sync_res.items()))
+    if connected and not args.dry_run:
+        lines.append("Not: Açık IDE/masaüstü istemcilerini değişikliklerin geçerli olması için yeniden başlatın.")
+    _out(args, out, "\n".join(lines))
     return EXIT_OK
 
 
@@ -500,10 +699,25 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("doctor", parents=[common], help="kurulum sağlık denetimi")
     s.set_defaults(func=cmd_doctor)
 
+    s = sub.add_parser("setup", parents=[common, advisor_opt],
+                       help="tek komutta kurulum/güncelleme (kasa + proje + istemci + skill)")
+    s.add_argument("--dlp", choices=("block", "redact"), help="DLP modu (work: block, diğer: redact)")
+    s.add_argument("--harness", action="append", choices=harness.HARNESSES,
+                   help="bağlanacak istemci (verilmezse yalnız zaten bu profile bağlı olanlar güncellenir)")
+    s.add_argument("--all-harnesses", action="store_true",
+                   help="algılanan ve başka profile bağlı olmayan tüm kurulu istemcileri bağla")
+    s.add_argument("--no-skill", action="store_true", help="global SKILL.md kopyalamasını atla")
+    s.add_argument("--project", action="append", metavar="[SLUG=]PATH",
+                   help="beyaz listeye eklenecek proje kökü (tekrarlanabilir)")
+    s.add_argument("--dry-run", action="store_true", help="değişiklik yazmadan önizle")
+    s.add_argument("--config-root", help="gerçek ev dizini yerine bu kökü kullan (test/izolasyon)")
+    s.set_defaults(func=cmd_setup)
+
     s = sub.add_parser("connect", parents=[common, advisor_opt], help="Devin/Antigravity/Claude/Codex bağla")
     s.add_argument("harness", choices=harness.HARNESSES)
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--uninstall", action="store_true")
+    s.add_argument("--with-skill", action="store_true", help="global skills/memory/SKILL.md dosyasını da kur/güncelle")
     s.add_argument("--config-root", help="gerçek ev dizini yerine bu kökü kullan (test/izolasyon)")
     s.set_defaults(func=cmd_connect)
 

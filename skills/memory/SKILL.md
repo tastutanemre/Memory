@@ -1,6 +1,6 @@
 ---
 name: memory
-description: İkinci Beyin (`mem`) hafızası — oturum başında bağlam yükle (memory_bootstrap), mimari kararları ADR olarak kaydet (memory_decide), kullanıcı düzeltmelerini kalıcı kural yap (memory_rule), anlamlı iş bitince makbuz ve devir kartı yaz (memory_finish). Bir "neden böyle yaptık?" sorusunda veya geçmiş karar/kural gerektiğinde memory_search ile ara. Çalışma alanı hafıza beyaz listesinde değilse (status=unregistered_workspace) hafızayı hiç kullanma.
+description: İkinci Beyin (`mem`) hafızası — oturum başında bağlam yükle (memory_bootstrap), mimari kararları ADR olarak kaydet (memory_decide), kullanıcı düzeltmelerini kalıcı kural yap (memory_rule), anlamlı iş bitince makbuz ve devir kartı yaz (memory_finish). Bir "neden böyle yaptık?" sorusunda veya geçmiş karar/kural gerektiğinde memory_search ile ara; `mem` kurulumu veya güncellemesi istendiğinde de bu kılavuzu aç. Çalışma alanı hafıza beyaz listesinde değilse (status=unregistered_workspace) hafızayı hiç kullanma.
 ---
 
 # Hafıza (`mem`) kullanım kılavuzu
@@ -25,6 +25,7 @@ description: İkinci Beyin (`mem`) hafızası — oturum başında bağlam yükl
 - Başka projenin notunu okuma/yazma; kasa dışına çıkan yol verme.
 - Çalışma alanı git reposuna hafıza dosyası yazma.
 
-## CLI karşılıkları
+## CLI karşılıkları ve Kurulum / Güncelleme
 
-`python mem.py init|project|bootstrap|search|read|decide|rule|patch|finish|compact|sync|connect|profiles|advisor|doctor` (`--json` ile makine okunur çıktı; `compact --days 14` eski oturum makbuzlarını aylık özet notuna sıkıştırır).
+- `python mem.py setup|init|project|bootstrap|search|read|decide|rule|patch|finish|compact|sync|connect|profiles|advisor|doctor` (`--json` ile makine okunur çıktı; `compact --days 14` eski oturum makbuzlarını aylık özet notuna sıkıştırır).
+- **`mem` kurulumu veya güncellemesi istendiğinde:** İstemcinin MCP ayarındaki mevcut `mem.py` yolundan (veya `profiles.json` kaydından) `Memory` repo dizinini bul ve oradaki `README.md` §4.0 protokolünü uygula (ikinci bir klon açma; güncellemede `main` dalını doğrulayıp `git pull --ff-only origin main` + `python mem.py setup` + `python mem.py doctor` çalıştır).
